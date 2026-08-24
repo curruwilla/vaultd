@@ -1,0 +1,102 @@
+# vaultd example configuration.
+#
+# Secrets are never written here: ${VAR} reads the environment and
+# ${file:/run/secrets/x} reads a file (a Docker/k8s secret mount). Everything
+# under `defaults` is inherited by every target that does not override it.
+#
+# Validate this file with:
+#   set -a; . examples/example.env; set +a
+#   vaultd validate -c examples/config.yaml
+
+version: 1
+
+defaults:
+  compression: { algo: zstd, level: 3, long: true }
+  encryption:
+    mode: age
+    # age recipients are public keys: the matching private key lives off this
+    # host, so a compromised backup server cannot read its own backups.
+    recipients: ["${VAULTD_AGE_RECIPIENT}"]
+  retention:
+    daily: { keep: 7 }
+    weekly: { keep: 4, on: sunday }
+    monthly: { keep: 6, on: 1 }
+    min_keep: 3
+  timeout: 4h
+  row_estimate: estimate
+  notify: [ops-webhook]
+
+destinations:
+  - name: r2
+    provider: r2
+    bucket: db-backups
+    endpoint: https://${CF_ACCOUNT_ID}.r2.cloudflarestorage.com
+    region: auto
+    access_key_id: ${R2_ACCESS_KEY_ID}
+    secret_access_key: ${R2_SECRET_ACCESS_KEY}
+    prefix: prod
+
+targets:
+  - name: prod-pg
+    engine: postgres
+    dsn: ${PROD_PG_DSN}
+    destination: r2
+    schedule: "0 3 * * *"
+    options:
+      exclude_table_data: ["public.audit_log", "public.sessions"]
+      include_globals: true
+    verify:
+      level: restore
+      schedule: "0 5 * * 0"
+      into: staging-pg
+      assertions:
+        - type: table_count
+        - type: row_count
+          tables: ["public.users", "public.orders"]
+          tolerance: 0
+        - type: query
+          sql: "select count(*) from users where email is null"
+          expect: 0
+        - type: max_age
+          value: 26h
+
+  - name: prod-mysql
+    engine: mysql
+    dsn: ${PROD_MYSQL_DSN}
+    destination: r2
+    schedule: "30 3 * * *"
+    options: { on_non_innodb: fail }
+    verify:
+      level: structural
+      schedule: "0 6 * * *"
+
+  - name: prod-mongo
+    engine: mongodb
+    uri: ${PROD_MONGO_URI}
+    destination: r2
+    schedule: "0 4 * * *"
+    options: { oplog: true }
+
+verify_targets:
+  - name: staging-pg
+    engine: postgres
+    # Needs CREATEDB and nothing beyond it; vaultd only ever creates and drops
+    # databases carrying database_prefix.
+    dsn: ${STAGING_PG_ADMIN_DSN}
+    database_prefix: vaultd_verify_
+    max_concurrent: 1
+
+notifiers:
+  - name: ops-webhook
+    type: webhook
+    url: ${OPS_WEBHOOK_URL}
+    secret: ${OPS_WEBHOOK_SECRET}   # HMAC-SHA256 in X-Vaultd-Signature
+    events: [backup.failed, verify.failed, retention.blocked, backup.succeeded]
+    template: generic
+    dedup_window: 1h
+
+server:
+  listen: ":8080"
+  ui: true
+  auth: { mode: token, token: "${VAULTD_UI_TOKEN}" }
+  metrics: true

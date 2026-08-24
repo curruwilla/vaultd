@@ -1,0 +1,69 @@
+version: "2"
+
+run:
+  timeout: 5m
+  tests: true
+
+linters:
+  default: standard   # errcheck, govet, ineffassign, staticcheck, unused
+  enable:
+    - bodyclose       # HTTP response bodies must be closed
+    - contextcheck    # do not drop a context on the floor
+    - copyloopvar
+    - durationcheck
+    - errorlint       # %w and errors.Is/As instead of == comparisons
+    - gocritic
+    - gosec
+    - misspell
+    - nilerr
+    - noctx           # every outbound request carries a context
+    - perfsprint
+    - revive
+    - rowserrcheck
+    - sloglint
+    - testifylint
+    - unconvert
+    - unparam
+    - usestdlibvars
+    - wastedassign
+    - whitespace
+
+  settings:
+    errcheck:
+      check-type-assertions: true
+    govet:
+      enable-all: true
+      disable:
+        - fieldalignment  # readability of config structs wins over padding
+    gosec:
+      excludes:
+        - G115  # integer conversion overflow: too noisy, revisit with real numbers
+    revive:
+      rules:
+        - name: exported
+          disabled: true  # doc comments are reviewed, not linted, at this stage
+    sloglint:
+      no-mixed-args: true
+      static-msg: false
+      key-naming-case: snake
+
+  exclusions:
+    presets:
+      - comments
+      - std-error-handling
+    rules:
+      # Test code may take shortcuts production code may not.
+      - path: _test\.go
+        linters:
+          - gosec
+          - noctx
+          - unparam
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    goimports:
+      local-prefixes:
+        - github.com/curruwilla/vaultd

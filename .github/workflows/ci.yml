@@ -1,0 +1,88 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "0 4 * * *"   # nightly fuzzing
+
+permissions:
+  contents: read
+
+env:
+  # golangci-lint 2.12 panics analyzing a Go 1.27 standard library; keep the
+  # lint job on a toolchain it supports until that lands upstream.
+  LINT_GO_VERSION: "1.25.x"
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        go: ["1.24.x", "1.25.x"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ matrix.go }}
+          check-latest: true
+      - run: go build ./...
+      - run: go vet ./...
+      - run: go test -race -covermode=atomic -coverprofile=coverage.out ./...
+      - run: go tool cover -func=coverage.out | tail -1
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.LINT_GO_VERSION }}
+      - uses: golangci/golangci-lint-action@v8
+        with:
+          version: v2.12.2
+
+  # The M0 acceptance gate: the shipped example config must validate on a
+  # machine that holds no real credentials.
+  validate-example:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25.x"
+      - run: make validate-example
+      - name: an invalid config must fail the command
+        run: |
+          set -a; . ./examples/example.env; set +a
+          unset VAULTD_AGE_RECIPIENT
+          if ./bin/vaultd validate -c examples/config.yaml; then
+            echo "validate accepted a config with an unresolved variable" >&2
+            exit 1
+          fi
+
+  vulncheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25.x"
+      - run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+
+  fuzz:
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25.x"
+      - run: go test ./internal/config/ -run FuzzParse -fuzz FuzzParse -fuzztime 10m
+      - if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-corpus
+          path: internal/config/testdata/fuzz/

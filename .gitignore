@@ -1,0 +1,31 @@
+SPEC.md
+
+# Binaries
+bin/
+dist/
+/vaultd
+
+# Test and coverage output
+*.test
+coverage.out
+coverage.html
+
+# Dependency and workspace files
+vendor/
+go.work
+go.work.sum
+
+# Local config and secrets — the real vaultd.yaml never belongs in git
+/vaultd.yaml
+*.env
+!examples/example.env
+*.age
+*.key
+
+# Editors
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store

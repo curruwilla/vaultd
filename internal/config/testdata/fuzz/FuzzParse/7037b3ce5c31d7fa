@@ -1,0 +1,2 @@
+go test fuzz v1
+string("targets: !0000000 00")
