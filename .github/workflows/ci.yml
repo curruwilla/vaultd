@@ -82,7 +82,7 @@ jobs:
           go-version: "1.25.x"
       - run: go test ./internal/config/ -run FuzzParse -fuzz FuzzParse -fuzztime 10m
       - if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: fuzz-corpus
           path: internal/config/testdata/fuzz/
