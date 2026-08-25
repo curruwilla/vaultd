@@ -18,43 +18,6 @@ func newPlannedCommands(g *globals) []*cobra.Command {
 		RunE:  planned(g, "doctor", "M6"),
 	}
 
-	verify := &cobra.Command{
-		Use:   "verify [backup-id]",
-		Short: "Verify a backup: integrity, structure or a real restore",
-		Args:  cobra.MaximumNArgs(1),
-		RunE:  planned(g, "verify", "M4"),
-	}
-	verify.Flags().String("target", "", "verify a target's backup instead of naming an id")
-	verify.Flags().Bool("latest", false, "with --target, verify its most recent backup")
-	verify.Flags().String("level", "", "integrity, structural or restore")
-	verify.Flags().Bool("gc", false, "drop leftover verify databases from a crashed run")
-
-	restore := &cobra.Command{
-		Use:   "restore <backup-id>",
-		Short: "Restore a backup into an explicit target",
-		Args:  cobra.ExactArgs(1),
-		RunE:  planned(g, "restore", "M4"),
-	}
-	restore.Flags().String("to", "", "destination DSN (required)")
-	restore.Flags().Bool("confirm", false, "acknowledge that this writes to a live database")
-	restore.Flags().Bool("force", false, "allow restoring into a non-empty database")
-
-	prune := &cobra.Command{
-		Use:   "prune <target>",
-		Short: "Apply the retention policy (dry run unless --apply)",
-		Args:  cobra.ExactArgs(1),
-		RunE:  planned(g, "prune", "M3"),
-	}
-	prune.Flags().Bool("apply", false, "actually delete; without it prune only reports")
-	prune.Flags().Bool("orphans", false, "also remove objects that have no manifest")
-
-	reindex := &cobra.Command{
-		Use:   "reindex <target>",
-		Short: "Rebuild the index and local cache from the bucket",
-		Args:  cobra.ExactArgs(1),
-		RunE:  planned(g, "reindex", "M3"),
-	}
-
 	serve := &cobra.Command{
 		Use:   "serve",
 		Short: "Run the daemon: scheduler, locks, metrics and UI",
@@ -69,7 +32,7 @@ func newPlannedCommands(g *globals) []*cobra.Command {
 		RunE:  planned(g, "run", "M7"),
 	}
 
-	return []*cobra.Command{doctor, verify, restore, prune, reindex, serve, run}
+	return []*cobra.Command{doctor, serve, run}
 }
 
 func planned(g *globals, name, milestone string) func(*cobra.Command, []string) error {

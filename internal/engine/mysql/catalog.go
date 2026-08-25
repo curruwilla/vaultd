@@ -231,9 +231,15 @@ func gtidEnabled(ctx context.Context, db *sql.DB) bool {
 // failure reduces a driver error to its message with the password removed: the
 // driver echoes the DSN it was given.
 func (d *Dumper) failure(err error) string {
+	return redactDriverError(err, d.conn.Password)
+}
+
+// redactDriverError strips a password out of a driver error and trims it to
+// something a log line can carry.
+func redactDriverError(err error, password string) string {
 	msg := err.Error()
-	if d.conn.Password != "" {
-		msg = strings.ReplaceAll(msg, d.conn.Password, "***")
+	if password != "" {
+		msg = strings.ReplaceAll(msg, password, "***")
 	}
 	if len(msg) > 300 {
 		return msg[:300] + "…"

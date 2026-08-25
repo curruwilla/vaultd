@@ -90,8 +90,12 @@ dev-clients:
 	@for deb in $(CLIENTS_DIR)/debs/mariadb-* $(CLIENTS_DIR)/debs/libmariadb3*; do dpkg -x $$deb $(CLIENTS_DIR)/mariadb; done
 	@for tool in pg_dump pg_dumpall pg_restore; do \
 		ln -sf $(CLIENTS_DIR)/pg/usr/lib/postgresql/$(PG_CLIENT_MAJOR)/bin/$$tool $(CLIENTS_DIR)/bin/$$tool; done
+	@# Both the dump clients and the interactive ones: restore feeds a dump
+	@# back through mysql or mariadb.
 	@ln -sf $(CLIENTS_DIR)/mysql/usr/bin/mysqldump $(CLIENTS_DIR)/bin/mysqldump
+	@ln -sf $(CLIENTS_DIR)/mysql/usr/bin/mysql $(CLIENTS_DIR)/bin/mysql
 	@ln -sf $(CLIENTS_DIR)/mariadb/usr/bin/mariadb-dump $(CLIENTS_DIR)/bin/mariadb-dump
+	@ln -sf $(CLIENTS_DIR)/mariadb/usr/bin/mariadb $(CLIENTS_DIR)/bin/mariadb
 	@# The MongoDB tools are not in the distribution archives; take them from
 	@# the same image the tests run against.
 	@cid=$$(docker create $(MONGO_TOOLS_IMAGE)); \

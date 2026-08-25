@@ -288,3 +288,16 @@ func render(diags config.Diagnostics) string {
 	}
 	return b.String()
 }
+
+// TestInterpolationInANumericFieldExplainsItself: ${VAR} is expanded after the
+// document is parsed, which keeps a secret full of colons and braces from
+// breaking the YAML — but it also means a reference cannot stand where a
+// number is expected. The error has to say so.
+func TestInterpolationInANumericFieldExplainsItself(t *testing.T) {
+	yaml := withTarget("retention:\n  daily: { keep: 7 }\n  min_keep: ${MIN_KEEP}")
+
+	_, _, err := config.Parse([]byte(yaml), config.LoadOptions{})
+
+	require.Error(t, err)
+	assert.Contains(t, config.FormatError(err), "cannot be templated")
+}

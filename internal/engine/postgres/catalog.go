@@ -108,9 +108,15 @@ func splitQualified(name string) (schema, table string, err error) {
 // connection string it was given, so the password is stripped before the text
 // reaches a log line or a webhook (SPEC §15).
 func (d *Dumper) connectFailure(err error) string {
+	return redactDriverError(err, d.conn.Password)
+}
+
+// redactDriverError strips a password out of a driver error and trims it to
+// something a log line can carry.
+func redactDriverError(err error, password string) string {
 	msg := err.Error()
-	if d.conn.Password != "" {
-		msg = strings.ReplaceAll(msg, d.conn.Password, "***")
+	if password != "" {
+		msg = strings.ReplaceAll(msg, password, "***")
 	}
 	if len(msg) > 300 {
 		return msg[:300] + "…"

@@ -15,15 +15,20 @@ import (
 	"sync"
 	"time"
 
+	"filippo.io/age"
+
 	"github.com/curruwilla/vaultd/internal/backup"
 	"github.com/curruwilla/vaultd/internal/config"
 	"github.com/curruwilla/vaultd/internal/core"
 	"github.com/curruwilla/vaultd/internal/engine/mongodb"
 	"github.com/curruwilla/vaultd/internal/engine/mysql"
 	"github.com/curruwilla/vaultd/internal/engine/postgres"
+	"github.com/curruwilla/vaultd/internal/index"
 	"github.com/curruwilla/vaultd/internal/manifest"
 	"github.com/curruwilla/vaultd/internal/pipeline"
+	"github.com/curruwilla/vaultd/internal/retention"
 	"github.com/curruwilla/vaultd/internal/storage/s3"
+	"github.com/curruwilla/vaultd/internal/verify"
 )
 
 // App holds the configuration and the adapters built from it. Stores are
@@ -122,6 +127,26 @@ func (a *App) Dumper(target *config.Target) (core.Dumper, error) {
 	}
 }
 
+// Restorer builds the client that writes a backup of the given engine back
+// into dsn. The destination comes from the command line, not from the config:
+// v1 restores into an explicit target, never implicitly into the database the
+// backup came from (SPEC §2).
+func (a *App) Restorer(engine core.Engine, dsn string, clean bool) (core.Restorer, error) {
+	switch engine {
+	case core.EnginePostgres:
+		return postgres.NewRestorer(postgres.RestoreOptions{DSN: dsn, Clean: clean})
+
+	case core.EngineMySQL, core.EngineMariaDB:
+		return mysql.NewRestorer(mysql.RestoreOptions{DSN: dsn, Flavor: flavorOf(engine)})
+
+	case core.EngineMongoDB:
+		return mongodb.NewRestorer(mongodb.RestoreOptions{URI: dsn, Drop: clean})
+
+	default:
+		return nil, fmt.Errorf("this backup was taken with engine %q, which this build cannot restore", engine)
+	}
+}
+
 // Layout returns the object key layout of a target inside its destination.
 func (a *App) Layout(target *config.Target) (manifest.Layout, error) {
 	dest, ok := a.cfg.Destination(target.Destination)
@@ -159,6 +184,74 @@ func (a *App) BackupSpec(target *config.Target, tier string) (backup.Spec, error
 	return spec, nil
 }
 
+// Index returns the listing cache of a target.
+func (a *App) Index(ctx context.Context, target *config.Target) (*index.Store, error) {
+	store, err := a.Store(ctx, target.Destination)
+	if err != nil {
+		return nil, err
+	}
+	layout, err := a.Layout(target)
+	if err != nil {
+		return nil, err
+	}
+	return index.New(store, layout), nil
+}
+
+// Retention translates a target's declared policy into the one prune applies.
+//
+// An absent block means every backup is kept forever, which is what an empty
+// policy does; the config warns about it at validate time.
+func (a *App) Retention(target *config.Target) retention.Policy {
+	declared := target.Retention
+	if declared == nil {
+		return retention.Policy{MinKeep: 1}
+	}
+
+	policy := retention.Policy{MinKeep: declared.MinKeep}
+	if declared.Hourly != nil {
+		policy.Hourly = retention.Rule{Keep: declared.Hourly.Keep}
+	}
+	if declared.Daily != nil {
+		policy.Daily = retention.Rule{Keep: declared.Daily.Keep}
+	}
+	if declared.Weekly != nil {
+		policy.Weekly = retention.WeekRule{Keep: declared.Weekly.Keep, On: time.Weekday(declared.Weekly.On)}
+	}
+	if declared.Monthly != nil {
+		policy.Monthly = retention.MonthRule{Keep: declared.Monthly.Keep, On: declared.Monthly.On}
+	}
+	if declared.Yearly != nil {
+		policy.Yearly = retention.Rule{Keep: declared.Yearly.Keep}
+	}
+	return policy
+}
+
+// Verifier assembles the verifier of a target. The age identities come from
+// the invocation rather than the config: the private key is deliberately not
+// something vaultd stores (SPEC §15).
+func (a *App) Verifier(ctx context.Context, target *config.Target, identities []age.Identity) (*verify.Verifier, error) {
+	store, err := a.Store(ctx, target.Destination)
+	if err != nil {
+		return nil, err
+	}
+	idx, err := a.Index(ctx, target)
+	if err != nil {
+		return nil, err
+	}
+
+	verifier := &verify.Verifier{
+		Store:      store,
+		Index:      idx,
+		Identities: identities,
+		Now:        func() time.Time { return time.Now().UTC() },
+		Log:        a.log,
+	}
+	if target.Encryption != nil {
+		verifier.Passphrase = target.Encryption.Passphrase.Reveal()
+	}
+	return verifier, nil
+}
+
 // Runner assembles the backup runner of a target.
 func (a *App) Runner(ctx context.Context, target *config.Target) (*backup.Runner, error) {
 	store, err := a.Store(ctx, target.Destination)
@@ -169,10 +262,15 @@ func (a *App) Runner(ctx context.Context, target *config.Target) (*backup.Runner
 	if err != nil {
 		return nil, err
 	}
+	layout, err := a.Layout(target)
+	if err != nil {
+		return nil, err
+	}
 
 	return &backup.Runner{
 		Store:  store,
 		Dumper: dumper,
+		Index:  index.New(store, layout),
 		Now:    func() time.Time { return time.Now().UTC() },
 		Log:    a.log,
 	}, nil

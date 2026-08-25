@@ -9,6 +9,7 @@ import (
 
 	"github.com/curruwilla/vaultd/internal/app"
 	"github.com/curruwilla/vaultd/internal/config"
+	"github.com/curruwilla/vaultd/internal/retention"
 	"github.com/curruwilla/vaultd/internal/storage/memory"
 )
 
@@ -165,4 +166,62 @@ func TestLayoutFollowsTheDestinationPrefix(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "prod", layout.Prefix)
 	assert.Equal(t, "prod-pg", layout.Target)
+}
+
+func TestRetentionMapsTheDeclaredPolicy(t *testing.T) {
+	cfg, diags, err := config.Parse([]byte(`
+version: 1
+destinations:
+  - name: r2
+    provider: r2
+    bucket: b
+    endpoint: https://acc.r2.cloudflarestorage.com
+    access_key_id: k
+    secret_access_key: s
+targets:
+  - name: prod-pg
+    engine: postgres
+    dsn: postgres://backup@pg:5432/app
+    destination: r2
+    encryption: { mode: none }
+    retention:
+      hourly:  { keep: 24 }
+      daily:   { keep: 7 }
+      weekly:  { keep: 4, on: sunday }
+      monthly: { keep: 12, on: 1 }
+      yearly:  { keep: 3 }
+      min_keep: 3
+`), config.LoadOptions{})
+	require.NoError(t, err)
+	require.False(t, diags.HasErrors(), "%v", diags)
+
+	target, _ := cfg.Target("prod-pg")
+	policy := app.New(cfg, nil).Retention(target)
+
+	assert.Equal(t, 24, policy.Hourly.Keep)
+	assert.Equal(t, 7, policy.Daily.Keep)
+	assert.Equal(t, 4, policy.Weekly.Keep)
+	assert.Equal(t, time.Sunday, policy.Weekly.On)
+	assert.Equal(t, 12, policy.Monthly.Keep)
+	assert.Equal(t, 1, policy.Monthly.On)
+	assert.Equal(t, 3, policy.Yearly.Keep)
+	assert.Equal(t, 3, policy.MinKeep)
+}
+
+// TestRetentionWithoutAPolicyKeepsEverything: an absent retention block must
+// not become "delete everything but the floor".
+func TestRetentionWithoutAPolicyKeepsEverything(t *testing.T) {
+	cfg := load(t)
+	target, _ := cfg.Target("prod-pg")
+	target.Retention = nil
+
+	policy := app.New(cfg, nil).Retention(target)
+	plan := policy.Plan(retention.Input{Backups: []retention.Backup{
+		{ID: "a", At: time.Now().Add(-72 * time.Hour)},
+		{ID: "b", At: time.Now().Add(-48 * time.Hour)},
+		{ID: "c", At: time.Now()},
+	}})
+
+	assert.Empty(t, plan.Delete)
+	assert.Len(t, plan.Keep, 3)
 }

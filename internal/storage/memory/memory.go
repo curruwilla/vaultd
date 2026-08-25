@@ -6,6 +6,8 @@ package memory
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"iter"
@@ -119,8 +121,26 @@ func (s *Store) PutIfAbsent(_ context.Context, key string, b []byte) (bool, erro
 	if _, exists := s.objects[key]; exists {
 		return false, nil
 	}
-	s.objects[key] = object{data: bytes.Clone(b), etag: etag(b), modified: s.Now()}
+	s.objects[key] = object{data: bytes.Clone(b), etag: etag2(b), modified: s.Now()}
 	return true, nil
+}
+
+// PutIfMatch overwrites key only if its ETag still matches.
+func (s *Store) PutIfMatch(_ context.Context, key string, b []byte, etag string) (core.ObjectInfo, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	existing, exists := s.objects[key]
+	switch {
+	case !exists && etag != "":
+		return core.ObjectInfo{}, false, nil
+	case exists && existing.etag != etag:
+		return core.ObjectInfo{}, false, nil
+	}
+
+	obj := object{data: bytes.Clone(b), etag: etag2(b), modified: s.Now()}
+	s.objects[key] = obj
+	return core.ObjectInfo{Key: key, Bytes: int64(len(b)), ETag: obj.etag, LastModified: obj.modified}, true, nil
 }
 
 // Objects returns a snapshot of every stored key. Tests assert on it.
@@ -139,12 +159,17 @@ func (s *Store) write(key string, data []byte) core.ObjectInfo {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	obj := object{data: data, etag: etag(data), modified: s.Now()}
+	obj := object{data: data, etag: etag2(data), modified: s.Now()}
 	s.objects[key] = obj
 	return core.ObjectInfo{Key: key, Bytes: int64(len(data)), ETag: obj.etag, LastModified: obj.modified}
 }
 
-func etag(b []byte) string { return fmt.Sprintf("%x", len(b)) }
+// etag2 is a content hash rather than a length, so that two writes of the same
+// size are still distinguishable to a conditional write.
+func etag2(b []byte) string {
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:8])
+}
 
 func notFound(key string) error { return fmt.Errorf("object %q: %w", key, core.ErrNotFound) }
 

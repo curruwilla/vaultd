@@ -150,7 +150,6 @@ func TestPlannedCommandsFailLoudly(t *testing.T) {
 		args      []string
 		milestone string
 	}{
-		{[]string{"prune", "prod-pg"}, "M3"},
 		{[]string{"serve"}, "M7"},
 	} {
 		t.Run(tc.args[0], func(t *testing.T) {

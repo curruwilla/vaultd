@@ -249,6 +249,14 @@ func seed(ctx context.Context, dsn string) error {
 func setup(t *testing.T, bucket string) (configPath string, identity *age.X25519Identity) {
 	t.Helper()
 
+	return setupWith(t, bucket, configTemplate)
+}
+
+// setupWith is setup with a config of the test's choosing, for the suites that
+// need a different retention policy or a deliberately broken target.
+func setupWith(t *testing.T, bucket, template string) (configPath string, identity *age.X25519Identity) {
+	t.Helper()
+
 	if !env.pgClientOK {
 		t.Skip("no pg_dump on this host; install postgresql-client or run `make dev-clients`")
 	}
@@ -273,7 +281,7 @@ func setup(t *testing.T, bucket string) (configPath string, identity *age.X25519
 	t.Setenv("E2E_PREFIX", "e2e")
 
 	configPath = filepath.Join(t.TempDir(), "vaultd.yaml")
-	require.NoError(t, os.WriteFile(configPath, []byte(configTemplate), 0o600))
+	require.NoError(t, os.WriteFile(configPath, []byte(template), 0o600))
 	return configPath, identity
 }
 
@@ -419,10 +427,22 @@ func TestBackupFailsOnUnreachableDatabase(t *testing.T) {
 	assert.NotContains(t, err.Error(), "s3cret", "the password must not leak into an error")
 
 	store := newStore(t, "vaultd-e2e-unreachable")
-	for object, err := range store.List(t.Context(), "e2e/") {
+
+	// No backup object, no manifest: a failed run leaves nothing that could be
+	// mistaken for a backup.
+	for object, err := range store.List(t.Context(), "e2e/prod-pg/") {
 		require.NoError(t, err)
 		t.Fatalf("a failed backup left %s behind", object.Key)
 	}
+
+	// The failure itself is recorded, because retention has to know that the
+	// most recent attempt did not produce a backup.
+	entries, err := manifest.ParseIndex(download(t, store, "e2e/_index/prod-pg.jsonl"))
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+	assert.False(t, entries[0].Succeeded())
+	assert.Equal(t, "probe", entries[0].Phase)
+	assert.NotContains(t, entries[0].Error, "s3cret", "the password must not reach the index either")
 }
 
 // assertRestorable reads the archive's table of contents with pg_restore,
@@ -623,6 +643,130 @@ func TestBackupEveryEngine(t *testing.T) {
 			plaintext := decrypt(t, stored, identity)
 			assert.Equal(t, m.Plaintext.SHA256, sha256hex(plaintext))
 			tt.wantContent(t, plaintext)
+
+			// Every engine's backup must also read back through the verifier,
+			// including the format check that knows what that engine's dump
+			// looks like.
+			stdout, stderr, err = run(t, "verify", "--target", tt.target, "--latest",
+				"--level", "structural", "--identity-file", identityFile(t, identity), "-c", configPath)
+			require.NoError(t, err, "stderr: %s", stderr)
+			assert.Contains(t, stdout, "passed structural verification")
 		})
 	}
+}
+
+// TestRestoreMySQL is the round trip for the other SQL engine: back up, then
+// restore into a database that did not exist, and count what arrived.
+func TestRestoreMySQL(t *testing.T) {
+	if !env.mysqlClientOK {
+		t.Skip("mysqldump is not installed on this host; run `make dev-clients`")
+	}
+
+	configPath, identity := setup(t, "vaultd-e2e-restore-mysql")
+
+	_, stderr, err := run(t, "backup", "prod-mysql", "-c", configPath)
+	require.NoError(t, err, "stderr: %s", stderr)
+
+	store := newStore(t, "vaultd-e2e-restore-mysql")
+	entry := latestBackup(t, store, "e2e/_index/prod-mysql.jsonl")
+
+	restoredDSN := createMySQLDatabase(t, "restored_here")
+
+	stdout, stderr, err := run(t, "restore", entry.ID, "--to", restoredDSN, "--confirm",
+		"--identity-file", identityFile(t, identity), "-c", configPath)
+	require.NoError(t, err, "stderr: %s", stderr)
+	assert.Contains(t, stdout, "ok: restored prod-mysql")
+
+	assert.Equal(t, int64(300), countMySQLRows(t, restoredDSN, "users"))
+	assert.Equal(t, int64(2), countMySQLRows(t, restoredDSN, "orders"))
+}
+
+// TestRestoreMongoDB restores into the deployment the archive came from, which
+// is what mongorestore does: the namespaces travel with the archive, so the
+// URI selects the server rather than a new name for the data. That makes the
+// destination non-empty, which is exactly the guard --force exists for.
+func TestRestoreMongoDB(t *testing.T) {
+	if !env.mongoClientOK {
+		t.Skip("mongorestore is not installed on this host; run `make dev-clients`")
+	}
+
+	configPath, identity := setup(t, "vaultd-e2e-restore-mongo")
+
+	_, stderr, err := run(t, "backup", "prod-mongo", "-c", configPath)
+	require.NoError(t, err, "stderr: %s", stderr)
+
+	store := newStore(t, "vaultd-e2e-restore-mongo")
+	entry := latestBackup(t, store, "e2e/_index/prod-mongo.jsonl")
+	key := identityFile(t, identity)
+
+	_, _, err = run(t, "restore", entry.ID, "--to", env.mongoURI, "--confirm", "--identity-file", key, "-c", configPath)
+	require.Error(t, err, "the deployment already holds these collections")
+	assert.Contains(t, err.Error(), "--force")
+
+	stdout, stderr, err := run(t, "restore", entry.ID, "--to", env.mongoURI, "--confirm", "--force", "--clean",
+		"--identity-file", key, "-c", configPath)
+	require.NoError(t, err, "stderr: %s", stderr)
+	assert.Contains(t, stdout, "ok: restored prod-mongo")
+
+	assert.Equal(t, int64(200), countMongoDocuments(t, env.mongoURI, "app", "users"))
+}
+
+// createMySQLDatabase makes an empty database on the test server and returns a
+// DSN pointing at it. The backup user is scoped to its own database — which is
+// the point of a least-privilege account — so the database is created as root
+// and then granted.
+func createMySQLDatabase(t *testing.T, name string) string {
+	t.Helper()
+
+	root, err := sql.Open("mysql", strings.Replace(env.mysqlDSN, "backup:s3cret", "root:s3cret", 1))
+	require.NoError(t, err)
+	defer root.Close()
+
+	for _, statement := range []string{
+		"drop database if exists " + name,
+		"create database " + name,
+		"grant all privileges on `" + name + "`.* to 'backup'@'%'",
+		"flush privileges",
+	} {
+		_, err := root.ExecContext(t.Context(), statement)
+		require.NoError(t, err, statement)
+	}
+
+	return replaceMySQLDatabase(env.mysqlDSN, name)
+}
+
+// replaceMySQLDatabase swaps the database in a driver-form MySQL DSN.
+func replaceMySQLDatabase(dsn, name string) string {
+	head, query, hasQuery := strings.Cut(dsn, "?")
+
+	slash := strings.LastIndex(head, "/")
+	out := head[:slash+1] + name
+	if hasQuery {
+		out += "?" + query
+	}
+	return out
+}
+
+func countMySQLRows(t *testing.T, dsn, table string) int64 {
+	t.Helper()
+
+	db, err := sql.Open("mysql", dsn)
+	require.NoError(t, err)
+	defer db.Close()
+
+	var rows int64
+	require.NoError(t, db.QueryRowContext(t.Context(), "select count(*) from `"+table+"`").Scan(&rows))
+	return rows
+}
+
+func countMongoDocuments(t *testing.T, uri, database, collection string) int64 {
+	t.Helper()
+
+	client, err := mongo.Connect(mongooptions.Client().ApplyURI(uri))
+	require.NoError(t, err)
+	defer func() { _ = client.Disconnect(t.Context()) }()
+
+	count, err := client.Database(database).Collection(collection).CountDocuments(t.Context(), bson.D{})
+	require.NoError(t, err)
+	return count
 }

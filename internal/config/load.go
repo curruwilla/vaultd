@@ -1,6 +1,7 @@
 package config
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -60,11 +61,27 @@ func Load(path string, opts LoadOptions) (*Config, Diagnostics, error) {
 // SyntaxError marks a config file that could not be parsed as YAML at all, as
 // opposed to one that is missing, unreadable, or semantically wrong. Only a
 // syntax error has a source line worth printing.
-type SyntaxError struct{ Err error }
+type SyntaxError struct {
+	Err error
+	// Hint is an extra line explaining a mistake the raw text makes likely.
+	Hint string
+}
 
 func (e *SyntaxError) Error() string { return e.Err.Error() }
 
 func (e *SyntaxError) Unwrap() error { return e.Err }
+
+// interpolationHint explains the trap a config with ${...} references can fall
+// into. Interpolation happens after parsing — which is what keeps a secret
+// containing a colon or a brace from breaking the document — so a reference
+// can only stand where a string is expected.
+func interpolationHint(data []byte) string {
+	if !bytes.Contains(data, []byte("${")) {
+		return ""
+	}
+	return "note: ${VAR} is expanded after the file is parsed, so a reference only fits where text is expected:\n" +
+		"      a number or a boolean cannot be templated, and inside { } a reference must be quoted."
+}
 
 // Parse is Load without the file read; it is the seam the tests use.
 func Parse(data []byte, opts LoadOptions) (cfg *Config, diags Diagnostics, err error) {
@@ -89,7 +106,7 @@ func parse(data []byte, opts LoadOptions) (*Config, Diagnostics, error) {
 	// that silently does nothing is exactly the failure mode backups cannot
 	// afford.
 	if err := yaml.UnmarshalWithOptions(data, &cfg, yaml.Strict()); err != nil {
-		return nil, nil, &SyntaxError{Err: err}
+		return nil, nil, &SyntaxError{Err: err, Hint: interpolationHint(data)}
 	}
 
 	in := newInterpolator()
@@ -116,7 +133,11 @@ func FormatError(err error) string {
 	if !errors.As(err, &syntax) {
 		return ""
 	}
-	return yaml.FormatError(syntax.Err, false, true)
+	formatted := yaml.FormatError(syntax.Err, false, true)
+	if syntax.Hint != "" {
+		formatted += "\n" + syntax.Hint
+	}
+	return formatted
 }
 
 // Marshal renders a config back to YAML with every secret redacted — the

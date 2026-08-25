@@ -31,12 +31,16 @@ const majorSearchRange = 5
 // everything a 17 server holds, and the failure would surface at restore time,
 // which is the worst possible moment to discover it.
 func (d *Dumper) resolveBinary(ctx context.Context, name string, serverMajor int) (engine.Binary, error) {
+	return resolveBinary(ctx, name, serverMajor, d.opts.BinDir)
+}
+
+func resolveBinary(ctx context.Context, name string, serverMajor int, binDir string) (engine.Binary, error) {
 	var found []engine.Binary
 
-	if d.opts.BinDir != "" {
-		binary, err := probeCandidate(ctx, name, filepath.Join(d.opts.BinDir, name))
+	if binDir != "" {
+		binary, err := probeCandidate(ctx, name, filepath.Join(binDir, name))
 		if err != nil {
-			return engine.Binary{}, fmt.Errorf("bin_dir %s: %w", d.opts.BinDir, err)
+			return engine.Binary{}, fmt.Errorf("bin_dir %s: %w", binDir, err)
 		}
 		if binary.Major < serverMajor {
 			return engine.Binary{}, versionError(name, serverMajor, []engine.Binary{binary})

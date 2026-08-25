@@ -231,11 +231,15 @@ type credentials struct {
 // into a pipe the child inherits: never on disk, never in argv, gone when the
 // process exits.
 func (d *Dumper) credentialArgs() (credentials, func(), error) {
+	return credentialArgs(d.conn)
+}
+
+func credentialArgs(conn connInfo) (credentials, func(), error) {
 	if _, err := os.Stat("/dev/fd"); err != nil {
 		// No /dev/fd (Windows, an unusual container): fall back to the command
 		// line, which is the only remaining option this client offers. The
 		// missing directory is the answer, not a failure to report.
-		return credentials{args: []string{"--uri=" + d.conn.Raw}}, func() {}, nil //nolint:nilerr
+		return credentials{args: []string{"--uri=" + conn.Raw}}, func() {}, nil //nolint:nilerr
 	}
 
 	reader, writer, err := os.Pipe()
@@ -245,7 +249,7 @@ func (d *Dumper) credentialArgs() (credentials, func(), error) {
 
 	go func() {
 		// A YAML document with one key; mongodump reads it before connecting.
-		_, _ = writer.WriteString("uri: " + d.conn.Raw + "\n")
+		_, _ = writer.WriteString("uri: " + conn.Raw + "\n")
 		_ = writer.Close()
 	}()
 

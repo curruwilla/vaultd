@@ -102,10 +102,17 @@ type GlobalsDumper interface {
 	DumpGlobals(ctx context.Context, w io.Writer) (DumpResult, error)
 }
 
-// Restorer restores a dump stream into target. v1 only ever points target at
-// an ephemeral or explicitly confirmed database.
+// Restorer writes a dump stream back into a database. A Restorer is built
+// around the destination it will write to — the same shape as a Dumper — so
+// that it can also answer whether that destination already holds data, which
+// is what stands between a restore and an overwritten production database.
+//
+// v1 only ever points a Restorer at an ephemeral or explicitly confirmed
+// database (SPEC §2).
 type Restorer interface {
-	Restore(ctx context.Context, r io.Reader, target DSN) error
+	// IsEmpty reports whether the destination holds no user data yet.
+	IsEmpty(ctx context.Context) (bool, error)
+	Restore(ctx context.Context, r io.Reader) error
 }
 
 // ObjectInfo is the metadata of a stored object.
@@ -137,6 +144,11 @@ type Store interface {
 	// PutIfAbsent writes key only if it does not exist yet (If-None-Match),
 	// reporting whether this caller created it. It is the target lock.
 	PutIfAbsent(ctx context.Context, key string, b []byte) (bool, error)
+	// PutIfMatch overwrites key only if it still carries etag, reporting
+	// whether the write went through. It is how the append-only index stays
+	// append-only: object stores have no append, so a concurrent writer must
+	// lose the race rather than silently truncate the other's entries.
+	PutIfMatch(ctx context.Context, key string, b []byte, etag string) (ObjectInfo, bool, error)
 }
 
 // ErrNotFound is returned by a Store when an object does not exist. Callers

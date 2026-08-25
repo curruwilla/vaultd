@@ -273,3 +273,57 @@ func TestRunIsMemoryBounded(t *testing.T) {
 func zstdOnly() pipeline.Spec {
 	return pipeline.Spec{Compression: pipeline.Compression{Algo: pipeline.AlgoZstd, Level: 1}}
 }
+
+func TestParseSpec(t *testing.T) {
+	tests := []struct {
+		compression string
+		encryption  string
+		wantAlgo    pipeline.Algo
+		wantLevel   int
+		wantMode    pipeline.Mode
+	}{
+		{"zstd:3", "age:x25519", pipeline.AlgoZstd, 3, pipeline.ModeAge},
+		{"gzip:6", "age:scrypt", pipeline.AlgoGzip, 6, pipeline.ModePassphrase},
+		{"none", "none", pipeline.AlgoNone, 0, pipeline.ModeNone},
+		{"zstd:19", "none", pipeline.AlgoZstd, 19, pipeline.ModeNone},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.compression+" "+tt.encryption, func(t *testing.T) {
+			spec, err := pipeline.ParseSpec(tt.compression, tt.encryption)
+
+			require.NoError(t, err)
+			assert.Equal(t, tt.wantAlgo, spec.Compression.Algo)
+			assert.Equal(t, tt.wantLevel, spec.Compression.Level)
+			assert.Equal(t, tt.wantMode, spec.Encryption.Mode)
+		})
+	}
+}
+
+// TestParseSpecRejectsWhatItCannotRead: a manifest from a newer build may
+// name a stage this one does not have, and guessing would produce garbage.
+func TestParseSpecRejectsWhatItCannotRead(t *testing.T) {
+	_, err := pipeline.ParseSpec("brotli:5", "none")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "cannot read")
+
+	_, err = pipeline.ParseSpec("zstd:3", "pgp:rsa")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "cannot read")
+}
+
+// TestParseSpecRoundTrip: what the manifest records must reconstruct the spec
+// that produced it.
+func TestParseSpecRoundTrip(t *testing.T) {
+	original := pipeline.Spec{
+		Compression: pipeline.Compression{Algo: pipeline.AlgoZstd, Level: 7},
+		Encryption:  pipeline.Encryption{Mode: pipeline.ModeAge, Recipients: []string{"age1..."}},
+	}
+
+	parsed, err := pipeline.ParseSpec(original.Compression.String(), original.Encryption.String())
+
+	require.NoError(t, err)
+	assert.Equal(t, original.Compression.Algo, parsed.Compression.Algo)
+	assert.Equal(t, original.Compression.Level, parsed.Compression.Level)
+	assert.Equal(t, original.Encryption.Mode, parsed.Encryption.Mode)
+}

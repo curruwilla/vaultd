@@ -13,6 +13,7 @@ import (
 
 	"github.com/curruwilla/vaultd/internal/buildinfo"
 	"github.com/curruwilla/vaultd/internal/core"
+	"github.com/curruwilla/vaultd/internal/index"
 	"github.com/curruwilla/vaultd/internal/manifest"
 	"github.com/curruwilla/vaultd/internal/pipeline"
 )
@@ -62,6 +63,9 @@ type Spec struct {
 type Runner struct {
 	Store  core.Store
 	Dumper core.Dumper
+	// Index is the listing cache. It is optional: a backup is complete once
+	// its manifest is stored, and the index can always be rebuilt from those.
+	Index *index.Store
 	// Now is the clock; tests replace it so keys are deterministic.
 	Now func() time.Time
 	Log *slog.Logger
@@ -117,7 +121,7 @@ func (r *Runner) Plan(ctx context.Context, spec Spec) (*Plan, error) {
 }
 
 // Run performs the backup and returns the manifest it stored.
-func (r *Runner) Run(ctx context.Context, spec Spec) (*manifest.Manifest, error) {
+func (r *Runner) Run(ctx context.Context, spec Spec) (result *manifest.Manifest, err error) {
 	if spec.Timeout > 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, spec.Timeout)
@@ -127,12 +131,30 @@ func (r *Runner) Run(ctx context.Context, spec Spec) (*manifest.Manifest, error)
 	started := r.now()
 	log := r.log().With("target", spec.Target, "engine", string(spec.Engine))
 
+	// A failed run is recorded too. Retention refuses to delete anything while
+	// the most recent attempt failed (SPEC §7, invariant 3), and an index that
+	// only holds successes cannot tell a quiet week from a broken one.
+	defer func() {
+		if err != nil {
+			r.recordFailure(ctx, spec, started, err)
+		}
+	}()
+
 	info, err := r.Dumper.Probe(ctx)
 	if err != nil {
 		return nil, &Error{Phase: PhaseProbe, Target: spec.Target, Err: err}
 	}
 
 	kind := spec.kind()
+
+	// Object keys are stamped to the second (SPEC §6.1), so two runs that
+	// start within the same second would land on the same key and the second
+	// would silently overwrite the first. Move forward until the slot is free.
+	started, err = r.reserve(ctx, spec, kind, started)
+	if err != nil {
+		return nil, &Error{Phase: PhaseUpload, Target: spec.Target, Err: err}
+	}
+
 	dataKey := spec.Layout.Data(started, kind, spec.extension())
 
 	log.InfoContext(ctx, "backup started",
@@ -217,6 +239,15 @@ func (r *Runner) Run(ctx context.Context, spec Spec) (*manifest.Manifest, error)
 		return nil, &Error{Phase: PhaseManifest, Target: spec.Target, Err: err}
 	}
 
+	// The index is a cache: a failure to update it does not undo a stored
+	// backup, and `vaultd reindex` puts it right.
+	if r.Index != nil {
+		if err := r.Index.Append(ctx, manifest.NewEntry(m, manifestKey)); err != nil {
+			log.WarnContext(ctx, "the backup is stored but the index was not updated; run `vaultd reindex`",
+				"error", err)
+		}
+	}
+
 	log.InfoContext(ctx, "backup finished",
 		"key", dataKey,
 		"manifest", manifestKey,
@@ -225,6 +256,67 @@ func (r *Runner) Run(ctx context.Context, spec Spec) (*manifest.Manifest, error)
 		"duration_ms", m.DurationMS)
 
 	return m, nil
+}
+
+// recordFailure appends a failure entry to the index. It runs on a context
+// detached from the run's own, because a timeout or a cancellation is exactly
+// the case worth recording.
+func (r *Runner) recordFailure(ctx context.Context, spec Spec, started time.Time, runErr error) {
+	if r.Index == nil {
+		return
+	}
+
+	phase := PhaseDump
+	var failure *Error
+	if errors.As(runErr, &failure) {
+		phase = failure.Phase
+	}
+
+	entry := manifest.NewFailureEntry(spec.Target, started.UTC(), r.now().UTC(), string(phase), runErr.Error())
+
+	ctx = context.WithoutCancel(ctx)
+	if err := r.Index.Append(ctx, entry); err != nil {
+		r.log().WarnContext(ctx, "could not record the failure in the index",
+			"target", spec.Target, "error", err)
+	}
+}
+
+// reserveWindow is how far the timestamp may be nudged before giving up. A
+// minute of one-second collisions means something is invoking backups in a
+// loop, which is a problem to report rather than to work around.
+const reserveWindow = 60
+
+// reserve finds a timestamp whose keys are not taken yet.
+func (r *Runner) reserve(ctx context.Context, spec Spec, kind manifest.Kind, at time.Time) (time.Time, error) {
+	for range reserveWindow {
+		manifestTaken, err := r.exists(ctx, spec.Layout.Manifest(at, kind))
+		if err != nil {
+			return time.Time{}, err
+		}
+		dataTaken, err := r.exists(ctx, spec.Layout.Data(at, kind, spec.extension()))
+		if err != nil {
+			return time.Time{}, err
+		}
+		if !manifestTaken && !dataTaken {
+			return at, nil
+		}
+		at = at.Add(time.Second)
+	}
+
+	return time.Time{}, fmt.Errorf("every key in the %d seconds from %s is already taken",
+		reserveWindow, at.Add(-reserveWindow*time.Second).Format(manifest.TimeFormat))
+}
+
+func (r *Runner) exists(ctx context.Context, key string) (bool, error) {
+	_, err := r.Store.Head(ctx, key)
+	switch {
+	case err == nil:
+		return true, nil
+	case errors.Is(err, core.ErrNotFound):
+		return false, nil
+	default:
+		return false, fmt.Errorf("checking whether %s is free: %w", key, err)
+	}
 }
 
 // stream runs one dump through the pipeline into one object, attributing a

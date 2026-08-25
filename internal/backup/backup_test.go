@@ -330,3 +330,33 @@ func TestErrorUnwraps(t *testing.T) {
 	require.ErrorIs(t, err, inner)
 	assert.Contains(t, err.Error(), "during upload")
 }
+
+// TestRunAvoidsKeyCollisions: object keys are stamped to the second, so two
+// runs that start in the same second would otherwise land on the same key and
+// the second would silently overwrite the first — a backup that looks taken
+// but is not there.
+func TestRunAvoidsKeyCollisions(t *testing.T) {
+	identity, err := age.GenerateX25519Identity()
+	require.NoError(t, err)
+
+	store := memory.New()
+	spec := newSpec(t, identity)
+
+	// A clock frozen at one instant is the worst case of two fast runs.
+	runner := &backup.Runner{Store: store, Dumper: newDumper(), Now: func() time.Time { return at }}
+
+	first, err := runner.Run(t.Context(), spec)
+	require.NoError(t, err)
+
+	second, err := (&backup.Runner{Store: store, Dumper: newDumper(), Now: func() time.Time { return at }}).
+		Run(t.Context(), spec)
+	require.NoError(t, err)
+
+	assert.NotEqual(t, first.Object.Key, second.Object.Key, "the second backup must not overwrite the first")
+	assert.Contains(t, second.Object.Key, "20260824T031501Z", "the timestamp moves on by a second")
+
+	objects := store.Objects()
+	assert.Len(t, objects, 4, "two backups, each an object and a manifest")
+	assert.Contains(t, objects, first.Object.Key)
+	assert.Contains(t, objects, second.Object.Key)
+}

@@ -120,6 +120,10 @@ func NewRootCommand(out, errOut io.Writer) *cobra.Command {
 		newValidateCommand(g),
 		newBackupCommand(g),
 		newListCommand(g),
+		newPruneCommand(g),
+		newReindexCommand(g),
+		newVerifyCommand(g),
+		newRestoreCommand(g),
 		newVersionCommand(g),
 	)
 	root.AddCommand(newPlannedCommands(g)...)

@@ -77,6 +77,52 @@ probe is not a formality: it decides the command line.
   MySQL or MariaDB one only warns (portable SQL); a client from the wrong fork
   is always refused.
 
+## Retention and the index
+
+- **Tiers are computed, not stamped.** `retention.Policy.Plan` classifies
+  backups from their timestamps every time it runs, so a policy change applies
+  retroactively and no recorded tier can drift out of step with the config. The
+  manifest's `tier` field is the label recorded at creation, nothing more.
+- **Periods are calendar components, never elapsed time.** `bucketKey` formats
+  a local date; nothing divides by 24 hours. That is what makes a 23- or
+  25-hour day, a leap day and an ISO week across a year boundary behave.
+- **A gap does not consume a slot.** `keep: 7` is the seven most recent periods
+  that hold a backup.
+- **The invariants in SPEC §7 are load-bearing.** Each has a test that fails
+  loudly if the rule is dropped: the `min_keep` floor, the most recent verified
+  backup, and the freeze after a failed run. An empty policy keeps everything —
+  the floor must never turn "no policy" into "delete all but min_keep".
+- **The index is a cache.** The manifests in the bucket are the truth.
+  Appending is a conditional write (`PutIfMatch`), so a concurrent writer loses
+  the race and retries instead of truncating entries it never saw, and a failed
+  index update never fails a stored backup.
+- **Failures are indexed too.** Without them, retention cannot tell a quiet
+  week from a broken one, and invariant 3 would have nothing to read.
+- **Delete objects first, then rewrite the index.** A stale index that still
+  lists a deleted backup is a nuisance; one that hides a backup which is still
+  there hides a restore.
+
+## Verification and restore
+
+- **A broken backup is a finding, not an error.** Corruption, a missing object
+  or a size that disagrees with the manifest come back as `Result.Problems`
+  with `OK: false`. Errors are reserved for what stops the check from running
+  at all — an unreachable bucket, or a key that matches no recipient. Reporting
+  a good backup as broken because the operator passed the wrong key would be
+  worse than saying nothing.
+- **Verification results are written back** to the manifest and the index. That
+  is the only reason retention can protect the most recent verified backup.
+- **The private key is never stored and never on argv.** It arrives as a file
+  path (`--identity-file`, `VAULTD_AGE_IDENTITY_FILE`) for the run that needs
+  it, which is also why `structural` and `restore` are the only commands that
+  ask for one.
+- **Restore says where it writes, every time.** `--confirm` is mandatory, a
+  non-empty destination needs `--force`, and a `--to` that matches a configured
+  target needs `--force` as well.
+- **The restored stream is checksummed on the way past.** A client that exits 0
+  having consumed half the archive leaves a database holding half a backup;
+  comparing against the manifest is what catches it.
+
 ## Conventions
 
 - **Secrets never print.** Connection strings, tokens and keys are

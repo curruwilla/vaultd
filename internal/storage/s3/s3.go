@@ -3,6 +3,7 @@
 package s3
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -233,6 +234,35 @@ func (s *Store) PutIfAbsent(ctx context.Context, key string, b []byte) (bool, er
 	return false, s.wrap("creating", key, err)
 }
 
+// PutIfMatch overwrites key only if its ETag still matches, which is what
+// makes a read-modify-write of the index safe against a concurrent writer.
+func (s *Store) PutIfMatch(ctx context.Context, key string, b []byte, etag string) (core.ObjectInfo, bool, error) {
+	input := &s3.PutObjectInput{
+		Bucket:      aws.String(s.bucket),
+		Key:         aws.String(key),
+		Body:        bytes.NewReader(b),
+		ContentType: aws.String("application/x-ndjson"),
+	}
+	if etag == "" {
+		// No ETag means "it should not exist yet".
+		input.IfNoneMatch = aws.String("*")
+	} else {
+		input.IfMatch = aws.String(quote(etag))
+	}
+
+	out, err := s.client.PutObject(ctx, input)
+	switch {
+	case err == nil:
+		return core.ObjectInfo{Key: key, Bytes: int64(len(b)), ETag: unquote(out.ETag)}, true, nil
+	case isPreconditionFailed(err), isNotFound(err):
+		// Someone else wrote first, or the object vanished: the caller re-reads
+		// and tries again rather than overwriting what it has not seen.
+		return core.ObjectInfo{}, false, nil
+	default:
+		return core.ObjectInfo{}, false, s.wrap("updating", key, err)
+	}
+}
+
 // wrap turns a provider error into one a caller can reason about: not-found is
 // a condition vaultd handles, everything else is a failure to report.
 func (s *Store) wrap(action, key string, err error) error {
@@ -271,5 +301,12 @@ func statusCode(err error) int {
 }
 
 func unquote(etag *string) string { return strings.Trim(aws.ToString(etag), `"`) }
+
+func quote(etag string) string {
+	if strings.HasPrefix(etag, `"`) {
+		return etag
+	}
+	return `"` + etag + `"`
+}
 
 var _ core.Store = (*Store)(nil)

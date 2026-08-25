@@ -4,12 +4,15 @@ Database backups to S3-compatible storage. One Go binary, one declarative config
 streaming dumps of MySQL/MariaDB, PostgreSQL and MongoDB, zstd compression, age
 encryption, GFS retention and real restore verification.
 
-**Status: M2.** All four engines back up end to end — PostgreSQL, MySQL,
-MariaDB and MongoDB. `vaultd backup` streams a dump through compression and age
-encryption into an S3-compatible bucket and writes a manifest beside it, and
-`vaultd list` reads those manifests back. Retention, verification and the daemon
-follow. Commands that are not implemented yet are registered, document their
-flags, and fail with the milestone that brings them.
+**Status: M4.** All four engines back up end to end — PostgreSQL, MySQL,
+MariaDB and MongoDB — old backups expire on a GFS retention policy, and a
+stored backup can be checked and restored. `vaultd backup` streams a dump
+through compression and age encryption into an S3-compatible bucket and writes
+a manifest beside it; `vaultd list` reads the index back; `vaultd prune`
+applies the policy; `vaultd verify` proves a backup still reads back; `vaultd
+restore` writes one into a database. Restore verification against a staging
+server and the daemon follow. Commands that are not implemented yet are
+registered, document their flags, and fail with the milestone that brings them.
 
 | Engine | Client it drives | Consistency it achieves |
 | --- | --- | --- |
@@ -79,6 +82,100 @@ Useful flags:
 | `--allow-unset-env` | Unresolved `${VAR}` becomes a warning — validating a config where the secrets are absent |
 | `--print-effective` | Print the merged config with every secret redacted |
 
+## Retention
+
+Retention is grandfather-father-son. A backup survives if it represents a
+period some tier still keeps, and one backup can represent several at once —
+the Sunday backup is usually the daily, the weekly, and on the first of the
+month the monthly one too:
+
+```yaml
+retention:
+  hourly:  { keep: 24 }
+  daily:   { keep: 7  }
+  weekly:  { keep: 4, on: sunday }
+  monthly: { keep: 12, on: 1 }
+  yearly:  { keep: 3 }
+  min_keep: 3          # the floor, whatever the rules above say
+```
+
+`keep: 7` means the seven most recent days **that hold a backup**, not the last
+seven calendar days: a week of downtime does not expire everything behind it.
+Which tiers a backup belongs to is worked out from the timestamps every time,
+so a policy change applies to the backups that already exist.
+
+`vaultd prune` reports and changes nothing unless `--apply` is given, and
+refuses to delete at all when:
+
+- it would leave fewer than `min_keep` backups;
+- it would remove the most recent **verified** backup — the only one anything
+  has evidence restores;
+- the most recent run of that target **failed**. A fresh backup that just broke
+  is exactly when the old ones matter.
+
+Objects that no manifest refers to — the residue of an interrupted run — are
+never touched by a normal prune. `--orphans` reports them, and only removes
+them together with `--apply`, ignoring anything written in the last 24 hours so
+a run that is still uploading is safe.
+
+```console
+$ vaultd prune prod-pg
+ACTION  FINISHED           SIZE     REASON               ID
+keep    2026-08-24 03:00Z  1.2 GB   daily+weekly         01JMX…
+keep    2026-08-17 03:00Z  1.2 GB   weekly               01JHW…
+delete  2026-08-23 03:00Z  1.2 GB   —                    01JMA…
+
+dry run: 1 backup (1.2 GB) would be deleted; re-run with --apply to carry it out
+```
+
+The per-target index (`<prefix>/_index/<target>.jsonl`) is a listing cache, not
+a second source of truth: it records every run, successful or failed, and
+`vaultd reindex` rebuilds it from the manifests whenever it is lost or stale.
+
+## Verification and restore
+
+A backup nobody has read back is a hypothesis. `vaultd verify` turns it into a
+fact, at two costs:
+
+| Level | What it does | Cost |
+| --- | --- | --- |
+| `integrity` | one HEAD per object: it is there, and it is the size the manifest records | no egress, safe to run after every backup |
+| `structural` | reads the object back in full, decrypts it, decompresses it, checks the plaintext checksum against the manifest and the format against the engine | egress and CPU, worth a daily schedule |
+
+```console
+$ vaultd verify --target prod-pg --latest --level structural --identity-file key.age
+ok: prod-pg passed structural verification
+  backup     01JMX… (2026-08-24 03:00Z)
+  level      structural in 12.4s
+  read back  19.4 GB
+  format     a pg_dump custom-format archive
+```
+
+A flipped byte fails it — age authenticates what it decrypts, so corruption
+surfaces before a checksum comparison is even reached. The outcome is written
+onto the manifest and into the index, which is what stops `prune` from deleting
+the most recent verified backup.
+
+Reading a backup back needs the age private key, and vaultd never stores it:
+it lives away from the machine that takes the backups (a compromised backup
+host that cannot read its own backups is the feature). Pass it as a file —
+`--identity-file`, or `VAULTD_AGE_IDENTITY_FILE` — never as a flag value, since
+argv is world-readable.
+
+Restore is always explicit about where it writes:
+
+```console
+$ vaultd restore 01JMX… --to postgres://…/restored --confirm --identity-file key.age
+```
+
+- `--confirm` is required: a restore writes to a live database.
+- A destination that already holds data is refused unless `--force`.
+- A `--to` that matches a database this config backs up is refused unless
+  `--force`, because restoring over production is rarely what was meant.
+- The plaintext is checksummed as it streams into the client and compared with
+  the manifest, so a restore that applied cleanly but wrote different bytes
+  than were backed up is reported as the failure it is.
+
 ## Configuration
 
 See [`examples/config.yaml`](examples/config.yaml). Secrets never live in the
@@ -101,8 +198,10 @@ Opting out is legal, but it is a line in the YAML that a reviewer can see.
 | `vaultd version` | ready |
 | `vaultd backup <target>` | ready — PostgreSQL, MySQL, MariaDB, MongoDB |
 | `vaultd list [target]` | ready |
-| `vaultd prune`, `vaultd reindex` | M3 |
-| `vaultd verify`, `vaultd restore` | M4 |
+| `vaultd prune <target>` | ready — dry run unless `--apply` |
+| `vaultd reindex <target>` | ready |
+| `vaultd verify [id]` | ready — integrity and structural |
+| `vaultd restore <id> --to <dsn>` | ready |
 | `vaultd doctor` | M6 |
 | `vaultd serve`, `vaultd run` | M7 |
 
@@ -155,7 +254,11 @@ internal/engine/     client resolution and stderr capture
   mysql/             mysqldump and mariadb-dump, and the flags each server accepts
   mongodb/           mongodump, replica-set detection, credentials over a pipe
 internal/storage/    s3/ (AWS, R2, MinIO) and memory/ for tests
-internal/manifest/   manifest schema, object key layout, index
+internal/manifest/   manifest schema, object key layout, index entries
+internal/index/      the listing cache: conditional append, rebuild
+internal/retention/  GFS classification and the invariants prune obeys
+internal/verify/     L0/L1 checks and the per-engine format validators
+internal/restore/    streaming a stored backup back into a database
 internal/backup/     the orchestration: probe → stream → manifest
 internal/app/        config to adapters, the wiring layer
 internal/cli/        the cobra command tree

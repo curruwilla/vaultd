@@ -49,8 +49,12 @@ func (d *Dumper) resolveClient(ctx context.Context, server serverVersion) (engin
 
 // candidatePaths lists where to look for one client name, best first.
 func (d *Dumper) candidatePaths(name string) []string {
-	if d.opts.BinDir != "" {
-		return []string{filepath.Join(d.opts.BinDir, name)}
+	return candidatePaths(name, d.opts.BinDir)
+}
+
+func candidatePaths(name, binDir string) []string {
+	if binDir != "" {
+		return []string{filepath.Join(binDir, name)}
 	}
 
 	path, err := exec.LookPath(name)
