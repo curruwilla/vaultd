@@ -22,6 +22,9 @@ go.work.sum
 *.age
 *.key
 
+# Local tool cache (unpacked database clients, fixtures)
+.cache/
+
 # Editors
 .idea/
 .vscode/

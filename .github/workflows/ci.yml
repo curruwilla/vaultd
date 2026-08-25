@@ -63,6 +63,59 @@ jobs:
             exit 1
           fi
 
+  # Container-backed tests: every engine's real client against a real server,
+  # and the real S3 protocol against MinIO.
+  integration:
+    runs-on: ubuntu-latest
+    env:
+      # A PostgreSQL client may never be older than the server it dumps, so the
+      # image matches the client installed below. The full 14-18 matrix lands
+      # with the release work in M9.
+      VAULTD_TEST_PG_IMAGE: postgres:16-alpine
+      VAULTD_TEST_MYSQL_IMAGE: mysql:8.0
+      VAULTD_TEST_MARIADB_IMAGE: mariadb:11.4
+      VAULTD_TEST_MONGO_IMAGE: mongo:7
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25.x"
+      - name: install the database clients
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y postgresql-client-16 mysql-client-8.0 mariadb-client
+      - name: install the MongoDB tools
+        # They are not in the distribution archives; take them from the same
+        # image the tests run against.
+        run: |
+          cid=$(docker create mongo:7)
+          docker cp "$cid:/usr/bin/mongodump" mongodump
+          docker cp "$cid:/usr/bin/mongorestore" mongorestore
+          docker rm "$cid"
+          sudo install -m 0755 mongodump mongorestore /usr/local/bin/
+      - run: go test -tags integration -timeout 1800s ./...
+
+  # A real bucket catches what MinIO cannot: R2's checksum handling,
+  # conditional writes and multipart quirks. The test skips itself when the
+  # secrets are absent, so forks stay green.
+  e2e-r2:
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    env:
+      VAULTD_TEST_PG_IMAGE: postgres:16-alpine
+      VAULTD_E2E_R2_ENDPOINT: ${{ secrets.VAULTD_E2E_R2_ENDPOINT }}
+      VAULTD_E2E_R2_BUCKET: ${{ secrets.VAULTD_E2E_R2_BUCKET }}
+      VAULTD_E2E_R2_ACCESS_KEY_ID: ${{ secrets.VAULTD_E2E_R2_ACCESS_KEY_ID }}
+      VAULTD_E2E_R2_SECRET_ACCESS_KEY: ${{ secrets.VAULTD_E2E_R2_SECRET_ACCESS_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25.x"
+      - name: install the database clients
+        run: sudo apt-get update && sudo apt-get install -y postgresql-client-16
+      - run: go test -tags integration -timeout 900s -run TestBackupToRealR2 -v ./test/e2e/
+
   vulncheck:
     runs-on: ubuntu-latest
     steps:

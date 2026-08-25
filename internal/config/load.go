@@ -57,6 +57,15 @@ func Load(path string, opts LoadOptions) (*Config, Diagnostics, error) {
 	return cfg, diags, nil
 }
 
+// SyntaxError marks a config file that could not be parsed as YAML at all, as
+// opposed to one that is missing, unreadable, or semantically wrong. Only a
+// syntax error has a source line worth printing.
+type SyntaxError struct{ Err error }
+
+func (e *SyntaxError) Error() string { return e.Err.Error() }
+
+func (e *SyntaxError) Unwrap() error { return e.Err }
+
 // Parse is Load without the file read; it is the seam the tests use.
 func Parse(data []byte, opts LoadOptions) (cfg *Config, diags Diagnostics, err error) {
 	// goccy/go-yaml v1.19.2 panics on some malformed documents (a tag on a
@@ -65,7 +74,9 @@ func Parse(data []byte, opts LoadOptions) (cfg *Config, diags Diagnostics, err e
 	// back into the parse error it should have been. Found by FuzzParse.
 	defer func() {
 		if r := recover(); r != nil {
-			cfg, diags, err = nil, nil, fmt.Errorf("config is not valid YAML: the decoder failed on this document (%v)", r)
+			cfg, diags, err = nil, nil, &SyntaxError{
+				Err: fmt.Errorf("the decoder failed on this document (%v)", r),
+			}
 		}
 	}()
 
@@ -78,7 +89,7 @@ func parse(data []byte, opts LoadOptions) (*Config, Diagnostics, error) {
 	// that silently does nothing is exactly the failure mode backups cannot
 	// afford.
 	if err := yaml.UnmarshalWithOptions(data, &cfg, yaml.Strict()); err != nil {
-		return nil, nil, err
+		return nil, nil, &SyntaxError{Err: err}
 	}
 
 	in := newInterpolator()
@@ -98,12 +109,14 @@ func parse(data []byte, opts LoadOptions) (*Config, Diagnostics, error) {
 }
 
 // FormatError renders a YAML syntax error with the offending source line, the
-// way goccy prints it. Colors are left off: the CLI decides.
+// way goccy prints it, and returns "" for every other kind of error so callers
+// can tell the two apart. Colors are left off: the CLI decides.
 func FormatError(err error) string {
-	if err == nil {
+	var syntax *SyntaxError
+	if !errors.As(err, &syntax) {
 		return ""
 	}
-	return yaml.FormatError(err, false, true)
+	return yaml.FormatError(syntax.Err, false, true)
 }
 
 // Marshal renders a config back to YAML with every secret redacted — the

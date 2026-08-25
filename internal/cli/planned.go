@@ -18,23 +18,6 @@ func newPlannedCommands(g *globals) []*cobra.Command {
 		RunE:  planned(g, "doctor", "M6"),
 	}
 
-	backup := &cobra.Command{
-		Use:   "backup <target>",
-		Short: "Back up one target now",
-		Args:  cobra.ExactArgs(1),
-		RunE:  planned(g, "backup", "M1"),
-	}
-	backup.Flags().Bool("dry-run", false, "probe and plan without writing anything")
-	backup.Flags().String("tier", "", "force the retention tier: hourly, daily, weekly, monthly, yearly")
-
-	list := &cobra.Command{
-		Use:   "list [target]",
-		Short: "List the backups of a target, newest first",
-		Args:  cobra.MaximumNArgs(1),
-		RunE:  planned(g, "list", "M1"),
-	}
-	list.Flags().Bool("json", false, "emit one JSON object per backup")
-
 	verify := &cobra.Command{
 		Use:   "verify [backup-id]",
 		Short: "Verify a backup: integrity, structure or a real restore",
@@ -86,7 +69,7 @@ func newPlannedCommands(g *globals) []*cobra.Command {
 		RunE:  planned(g, "run", "M7"),
 	}
 
-	return []*cobra.Command{doctor, backup, list, verify, restore, prune, reindex, serve, run}
+	return []*cobra.Command{doctor, verify, restore, prune, reindex, serve, run}
 }
 
 func planned(g *globals, name, milestone string) func(*cobra.Command, []string) error {

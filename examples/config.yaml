@@ -70,6 +70,15 @@ targets:
       level: structural
       schedule: "0 6 * * *"
 
+  - name: prod-mariadb
+    engine: mariadb
+    dsn: ${PROD_MARIADB_DSN}
+    destination: r2
+    schedule: "45 3 * * *"
+    # MariaDB is dumped with mariadb-dump, and never with Oracle's client:
+    # the flags and the output diverge.
+    options: { on_non_innodb: warn }
+
   - name: prod-mongo
     engine: mongodb
     uri: ${PROD_MONGO_URI}

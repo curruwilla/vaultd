@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 
 	"github.com/spf13/cobra"
@@ -45,8 +46,9 @@ type globals struct {
 	logFormat     string
 	allowUnsetEnv bool
 
-	out io.Writer
-	err io.Writer
+	logger *slog.Logger
+	out    io.Writer
+	err    io.Writer
 }
 
 // load reads the config the way every command that needs one should.
@@ -106,15 +108,18 @@ func NewRootCommand(out, errOut io.Writer) *cobra.Command {
 	flags.BoolVar(&g.allowUnsetEnv, "allow-unset-env", false, "treat unresolved ${VAR} references as warnings instead of errors")
 
 	root.PersistentPreRunE = func(_ *cobra.Command, _ []string) error {
-		_, err := logging.Setup(errOut, g.logLevel, g.logFormat)
+		logger, err := logging.Setup(errOut, g.logLevel, g.logFormat)
 		if err != nil {
 			return usageErrorf("%w", err)
 		}
+		g.logger = logger
 		return nil
 	}
 
 	root.AddCommand(
 		newValidateCommand(g),
+		newBackupCommand(g),
+		newListCommand(g),
 		newVersionCommand(g),
 	)
 	root.AddCommand(newPlannedCommands(g)...)

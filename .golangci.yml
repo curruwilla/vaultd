@@ -3,6 +3,9 @@ version: "2"
 run:
   timeout: 5m
   tests: true
+  # Lint the container-backed tests too; they are code that rots like any other.
+  build-tags:
+    - integration
 
 linters:
   default: standard   # errcheck, govet, ineffassign, staticcheck, unused
@@ -35,6 +38,7 @@ linters:
       enable-all: true
       disable:
         - fieldalignment  # readability of config structs wins over padding
+        - shadow          # `if err := f(); err != nil` shadows by design
     gosec:
       excludes:
         - G115  # integer conversion overflow: too noisy, revisit with real numbers

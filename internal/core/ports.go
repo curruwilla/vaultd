@@ -6,6 +6,7 @@ package core
 
 import (
 	"context"
+	"errors"
 	"io"
 	"iter"
 	"time"
@@ -47,6 +48,10 @@ const (
 	ConsistencySingleTransaction Consistency = "single_transaction"
 	// ConsistencyPointInTime is mongodump --oplog against a replica set.
 	ConsistencyPointInTime Consistency = "point_in_time"
+	// ConsistencyLockedTables means every table was read-locked for the
+	// duration of the dump: consistent across storage engines, at the cost of
+	// blocking writers.
+	ConsistencyLockedTables Consistency = "locked_tables"
 	// ConsistencyBestEffort means the engine could not offer a consistent snapshot.
 	ConsistencyBestEffort Consistency = "best_effort"
 )
@@ -88,6 +93,15 @@ type Dumper interface {
 	Dump(ctx context.Context, w io.Writer) (DumpResult, error)
 }
 
+// GlobalsDumper is implemented by engines that carry objects living outside
+// any single database — PostgreSQL roles and tablespaces. The backup runner
+// asks for it with a type assertion, so engines without the concept simply do
+// not implement it.
+type GlobalsDumper interface {
+	HasGlobals() bool
+	DumpGlobals(ctx context.Context, w io.Writer) (DumpResult, error)
+}
+
 // Restorer restores a dump stream into target. v1 only ever points target at
 // an ephemeral or explicitly confirmed database.
 type Restorer interface {
@@ -124,3 +138,8 @@ type Store interface {
 	// reporting whether this caller created it. It is the target lock.
 	PutIfAbsent(ctx context.Context, key string, b []byte) (bool, error)
 }
+
+// ErrNotFound is returned by a Store when an object does not exist. Callers
+// distinguish "this backup is gone" from "the bucket is unreachable" with
+// errors.Is, never by matching provider-specific error text.
+var ErrNotFound = errors.New("object not found")

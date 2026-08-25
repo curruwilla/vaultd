@@ -150,7 +150,6 @@ func TestPlannedCommandsFailLoudly(t *testing.T) {
 		args      []string
 		milestone string
 	}{
-		{[]string{"backup", "prod-pg"}, "M1"},
 		{[]string{"prune", "prod-pg"}, "M3"},
 		{[]string{"serve"}, "M7"},
 	} {
@@ -182,4 +181,44 @@ func TestBareInvocationShowsHelp(t *testing.T) {
 
 	assert.Equal(t, ExitOK, code)
 	assert.Contains(t, stdout, "Usage:")
+}
+
+func TestBackupRejectsAnUnknownTarget(t *testing.T) {
+	t.Setenv("PG_DSN", "postgres://backup@pg:5432/app")
+	path := writeConfig(t, validConfig)
+
+	_, stderr, code := run(t, "backup", "staging-pg", "-c", path)
+
+	assert.Equal(t, ExitError, code)
+	assert.Contains(t, stderr, `target "staging-pg" is not declared`)
+	assert.Contains(t, stderr, "declared targets are prod-pg")
+}
+
+// TestBackupRefusesAnInvalidConfig matters more than it looks: a backup taken
+// from a config that does not validate is exactly the kind of thing nobody
+// notices until a restore.
+func TestBackupRefusesAnInvalidConfig(t *testing.T) {
+	path := writeConfig(t, validConfig) // ${PG_DSN} is not set
+
+	_, stderr, code := run(t, "backup", "prod-pg", "-c", path)
+
+	assert.Equal(t, ExitError, code)
+	assert.Contains(t, stderr, "${PG_DSN} is not set")
+	assert.Contains(t, stderr, "fix it before running a backup")
+}
+
+func TestBackupNeedsATarget(t *testing.T) {
+	_, _, code := run(t, "backup")
+
+	assert.Equal(t, ExitError, code)
+}
+
+func TestListRejectsAnUnknownTarget(t *testing.T) {
+	t.Setenv("PG_DSN", "postgres://backup@pg:5432/app")
+	path := writeConfig(t, validConfig)
+
+	_, stderr, code := run(t, "list", "nope", "-c", path)
+
+	assert.Equal(t, ExitError, code)
+	assert.Contains(t, stderr, `target "nope" is not declared`)
 }
