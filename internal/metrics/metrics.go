@@ -138,11 +138,12 @@ func (m *Metrics) BackupSucceeded(target, engine string, d time.Duration, compre
 }
 
 // BackupFailed records one failed run against the phase it died in.
+//
+// Nothing is observed on the duration histogram: a run that failed has no
+// duration worth comparing against the ones that worked, and mixing them would
+// make the p99 of a healthy target move every time an unhealthy one broke.
 func (m *Metrics) BackupFailed(target, phase string) {
 	m.backupFailures.WithLabelValues(target, phase).Inc()
-	// The counter has to exist before it can be incremented anywhere else, and
-	// a target that has never failed should read 0 rather than be absent.
-	m.backupDuration.WithLabelValues(target, "")
 }
 
 // VerifySucceeded records a verification that passed.
