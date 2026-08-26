@@ -11,6 +11,7 @@ import (
 	"iter"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
@@ -310,3 +311,27 @@ func quote(etag string) string {
 }
 
 var _ core.Store = (*Store)(nil)
+
+// Presign returns a URL that grants anyone holding it a single GET of one
+// object until it expires.
+//
+// It is how the UI offers a download without proxying gigabytes through the
+// daemon, and without handing the browser the bucket credentials. The TTL is
+// the caller's, and every caller keeps it short: the URL is a bearer token for
+// one backup, and a backup is the most sensitive object vaultd touches.
+func (s *Store) Presign(ctx context.Context, key string, ttl time.Duration) (string, error) {
+	presigner := s3.NewPresignClient(s.client, func(o *s3.PresignOptions) {
+		o.Expires = ttl
+	})
+
+	request, err := presigner.PresignGetObject(ctx, &s3.GetObjectInput{
+		Bucket: aws.String(s.bucket),
+		Key:    aws.String(key),
+	})
+	if err != nil {
+		return "", s.wrap("presigning", key, err)
+	}
+	return request.URL, nil
+}
+
+var _ core.Presigner = (*Store)(nil)

@@ -24,7 +24,9 @@ import (
 	"github.com/curruwilla/vaultd/internal/app"
 	"github.com/curruwilla/vaultd/internal/config"
 	"github.com/curruwilla/vaultd/internal/core"
+	"github.com/curruwilla/vaultd/internal/doctor"
 	"github.com/curruwilla/vaultd/internal/metrics"
+	"github.com/curruwilla/vaultd/internal/scheduler"
 )
 
 const (
@@ -49,10 +51,20 @@ type Server struct {
 	// function rather than a pointer so the server does not have to know how
 	// the daemon is wired.
 	Status StatusFunc
+	// Exec runs the jobs the UI's buttons start. It is nil when nothing is
+	// scheduling — a server with no executor serves the read-only API and
+	// tells the UI plainly that it cannot start runs.
+	Exec *scheduler.Executor
 
 	once  sync.Once
 	mux   *http.ServeMux
 	ready readiness
+	runs  *runs
+	ctx   context.Context
+
+	doctorMu     sync.Mutex
+	doctorReport *doctor.Report
+	doctorAt     time.Time
 }
 
 // StatusFunc returns the daemon's current view of its schedule.
@@ -64,9 +76,14 @@ func (s *Server) Handler() http.Handler {
 	return s.mux
 }
 
+// SetContext gives background work — a run the UI started — a context that
+// outlives the request that asked for it but not the daemon.
+func (s *Server) SetContext(ctx context.Context) { s.ctx = ctx }
+
 // ListenAndServe runs until ctx is cancelled, then drains.
 func (s *Server) ListenAndServe(ctx context.Context) error {
 	cfg := s.App.Config().Server
+	s.SetContext(context.WithoutCancel(ctx))
 
 	server := &http.Server{
 		Addr:              cfg.Listen,
@@ -108,6 +125,7 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 // routes wires the endpoints.
 func (s *Server) routes() {
 	s.mux = http.NewServeMux()
+	s.runs = newRuns()
 	cfg := s.App.Config().Server
 
 	// Probes are never authenticated: a liveness check that needs a secret is
@@ -120,9 +138,13 @@ func (s *Server) routes() {
 	}
 
 	s.mux.Handle("GET /api/", s.authenticate(s.api()))
+	s.mux.Handle("POST /api/", s.authenticate(s.actions()))
 
 	if cfg.UI {
-		s.mux.Handle("GET /", s.authenticate(s.ui()))
+		// The shell itself is not behind the token, and cannot be: the page
+		// has to load before it can ask for one. It carries no data — every
+		// byte a viewer would care about comes from /api, which is guarded.
+		s.mux.Handle("GET /", s.ui())
 	}
 }
 
@@ -268,3 +290,10 @@ func (s *Server) log() *slog.Logger {
 	}
 	return s.Log
 }
+
+// buildTime is the modification time served with the SPA. It is the process
+// start rather than anything from the filesystem: the assets live in the
+// binary, so "when did this change" is "when did this build start running".
+func buildTime() time.Time { return processStart }
+
+var processStart = time.Now()

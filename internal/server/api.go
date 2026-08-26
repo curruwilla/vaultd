@@ -8,6 +8,8 @@ import (
 	"sort"
 	"time"
 
+	"github.com/goccy/go-yaml"
+
 	"github.com/curruwilla/vaultd/internal/buildinfo"
 	"github.com/curruwilla/vaultd/internal/config"
 	"github.com/curruwilla/vaultd/internal/core"
@@ -28,8 +30,8 @@ type JobStatus struct {
 	Target   string    `json:"target"`
 	Kind     string    `json:"kind"`
 	Schedule string    `json:"schedule"`
-	LastRun  time.Time `json:"last_run,omitempty"`
-	Next     time.Time `json:"next,omitempty"`
+	LastRun  time.Time `json:"last_run,omitzero"`
+	Next     time.Time `json:"next,omitzero"`
 }
 
 // TargetSummary is one row of the overview grid.
@@ -41,7 +43,7 @@ type TargetSummary struct {
 	Health      Health      `json:"health"`
 	Reason      string      `json:"reason"`
 
-	LastBackupAt   time.Time `json:"last_backup_at,omitempty"`
+	LastBackupAt   time.Time `json:"last_backup_at,omitzero"`
 	LastBackupID   string    `json:"last_backup_id,omitempty"`
 	AgeSeconds     int64     `json:"age_seconds,omitempty"`
 	Bytes          int64     `json:"bytes,omitempty"`
@@ -50,11 +52,11 @@ type TargetSummary struct {
 	TotalBytes     int64     `json:"total_bytes"`
 
 	VerifyLevel string    `json:"verify_level,omitempty"`
-	VerifiedAt  time.Time `json:"verified_at,omitempty"`
+	VerifiedAt  time.Time `json:"verified_at,omitzero"`
 	VerifyOK    *bool     `json:"verify_ok,omitempty"`
 
 	LastFailure string    `json:"last_failure,omitempty"`
-	FailedAt    time.Time `json:"failed_at,omitempty"`
+	FailedAt    time.Time `json:"failed_at,omitzero"`
 
 	// Error is set when this target's own state could not be read. The rest of
 	// the grid still renders: one unreachable bucket must not blank the page.
@@ -87,6 +89,14 @@ type RetentionRow struct {
 	Reason string    `json:"reason"`
 }
 
+// BackupDetail is the Backup screen: the manifest as stored, the index entry
+// that points at it, and the command an operator would run to bring it back.
+type BackupDetail struct {
+	Manifest       *manifest.Manifest `json:"manifest"`
+	Entry          manifest.Entry     `json:"entry"`
+	RestoreCommand string             `json:"restore_command"`
+}
+
 // api routes the read-only surface.
 func (s *Server) api() http.Handler {
 	mux := http.NewServeMux()
@@ -97,6 +107,10 @@ func (s *Server) api() http.Handler {
 	mux.HandleFunc("GET /api/targets/{name}", s.apiTarget)
 	mux.HandleFunc("GET /api/backups/{target}/{id}", s.apiBackup)
 	mux.HandleFunc("GET /api/config", s.apiConfig)
+	mux.HandleFunc("GET /api/doctor", s.apiDoctor)
+	mux.HandleFunc("GET /api/runs", s.apiRuns)
+	mux.HandleFunc("GET /api/runs/{id}", s.apiRun)
+	mux.HandleFunc("GET /api/backups/{target}/{id}/download", s.apiDownload)
 
 	return mux
 }
@@ -178,20 +192,42 @@ func (s *Server) apiBackup(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "%s", err)
 			return
 		}
-		writeJSON(w, http.StatusOK, m)
+
+		writeJSON(w, http.StatusOK, BackupDetail{
+			Manifest: m,
+			Entry:    entry,
+			// The UI never restores anything (SPEC §13). What it offers is the
+			// command, with the destination left for a human to fill in.
+			RestoreCommand: restoreCommand(target, m.ID),
+		})
 		return
 	}
 
 	writeError(w, http.StatusNotFound, "no backup %q in %s", id, target.Name)
 }
 
-// apiConfig renders the effective configuration with every secret redacted.
+// EffectiveConfig is the configuration as vaultd resolved it: every default
+// applied, every ${VAR} expanded, every secret replaced.
+type EffectiveConfig struct {
+	Path string `json:"path"`
+	YAML string `json:"yaml"`
+}
+
+// apiConfig renders the effective configuration.
 //
-// The UI never serves the raw YAML (SPEC §15): config.Secret redacts itself
-// through MarshalJSON, so what leaves here is what a screenshot may safely
-// contain.
+// It is re-marshalled from the parsed structs rather than read off disk, which
+// is the whole point: the file on disk is full of ${VAR} references and says
+// nothing about what a target actually inherited. And it never carries a
+// secret — config.Secret renders itself as *** through MarshalYAML, so what
+// leaves here is what a screenshot may safely contain (SPEC §15).
 func (s *Server) apiConfig(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, s.App.Config())
+	body, err := yaml.Marshal(s.App.Config())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "rendering the config: %s", err)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, EffectiveConfig{Path: s.App.Config().Path, YAML: string(body)})
 }
 
 // summarize builds one overview row.

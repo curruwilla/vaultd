@@ -1,0 +1,255 @@
+/* vaultd UI — an operator dashboard: dense, legible, and readable at a glance
+   from across a room, because that is how a backup status board is used. */
+
+:root {
+  color-scheme: light dark;
+
+  --bg: #f6f7f9;
+  --panel: #ffffff;
+  --panel-2: #fbfbfd;
+  --line: #e2e5ea;
+  --ink: #14181f;
+  --ink-2: #5a6270;
+  --ink-3: #8b94a3;
+  --accent: #2f6feb;
+  --green: #1f9254;
+  --amber: #b8770a;
+  --red: #c03530;
+  --grey: #737b88;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  --sans: system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --radius: 8px;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0f1216;
+    --panel: #161a20;
+    --panel-2: #1b2027;
+    --line: #262c35;
+    --ink: #e6e9ee;
+    --ink-2: #a3acbb;
+    --ink-3: #6f7887;
+    --accent: #5b91f5;
+    --green: #3fbb75;
+    --amber: #d9a441;
+    --red: #e8615b;
+    --grey: #7d8695;
+  }
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font: 14px/1.5 var(--sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+code, .mono { font-family: var(--mono); font-size: 12.5px; }
+
+/* Layout ------------------------------------------------------------------ */
+
+header {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  padding: 0 24px;
+  height: 56px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+  position: sticky;
+  top: 0;
+  z-index: 10;
+}
+
+header .brand { font-weight: 650; letter-spacing: -0.01em; font-size: 15px; }
+header .brand span { color: var(--ink-3); font-weight: 400; margin-left: 6px; font-size: 12px; }
+header nav { display: flex; gap: 4px; margin-left: auto; }
+
+header nav a {
+  padding: 6px 12px;
+  border-radius: 6px;
+  color: var(--ink-2);
+  font-weight: 500;
+}
+header nav a:hover { background: var(--panel-2); text-decoration: none; }
+header nav a.on { background: var(--accent); color: #fff; }
+
+main { padding: 24px; max-width: 1200px; margin: 0 auto; }
+
+h1 { font-size: 20px; margin: 0 0 4px; letter-spacing: -0.02em; }
+h2 { font-size: 15px; margin: 28px 0 10px; letter-spacing: -0.01em; }
+.sub { color: var(--ink-2); margin: 0 0 20px; }
+
+/* Cards ------------------------------------------------------------------- */
+
+.grid { display: grid; gap: 14px; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); }
+
+.card {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 16px;
+  display: block;
+  color: inherit;
+}
+a.card:hover { border-color: var(--accent); text-decoration: none; }
+
+.card .top { display: flex; align-items: baseline; gap: 8px; margin-bottom: 2px; }
+.card .name { font-weight: 600; font-size: 15px; }
+.card .engine { color: var(--ink-3); font-size: 12px; }
+.card .reason { color: var(--ink-2); font-size: 12.5px; margin-bottom: 12px; }
+
+.facts { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 16px; }
+.fact .k { color: var(--ink-3); font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; }
+.fact .v { font-variant-numeric: tabular-nums; }
+
+/* Traffic light ----------------------------------------------------------- */
+
+.dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; flex: none; }
+.green .dot, .dot.green { background: var(--green); }
+.amber .dot, .dot.amber { background: var(--amber); }
+.red   .dot, .dot.red   { background: var(--red); }
+.unknown .dot, .dot.unknown { background: var(--grey); }
+
+.card.red { border-left: 3px solid var(--red); }
+.card.amber { border-left: 3px solid var(--amber); }
+.card.green { border-left: 3px solid var(--green); }
+.card.unknown { border-left: 3px solid var(--grey); }
+
+/* Tables ------------------------------------------------------------------ */
+
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+th {
+  text-align: left;
+  color: var(--ink-3);
+  font-weight: 500;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 0 12px 8px 0;
+  border-bottom: 1px solid var(--line);
+}
+td { padding: 8px 12px 8px 0; border-bottom: 1px solid var(--line); vertical-align: top; }
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; padding-right: 16px; }
+tr:last-child td { border-bottom: none; }
+
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 16px;
+  overflow-x: auto;
+}
+
+/* Buttons ----------------------------------------------------------------- */
+
+.actions { display: flex; gap: 8px; flex-wrap: wrap; margin: 0 0 20px; }
+
+button {
+  font: inherit;
+  font-weight: 500;
+  padding: 7px 14px;
+  border-radius: 6px;
+  border: 1px solid var(--line);
+  background: var(--panel);
+  color: var(--ink);
+  cursor: pointer;
+}
+button:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+button:disabled { opacity: 0.45; cursor: not-allowed; }
+button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+button.primary:hover:not(:disabled) { color: #fff; filter: brightness(1.08); }
+button.danger { color: var(--red); border-color: var(--red); }
+button.danger:hover:not(:disabled) { background: var(--red); color: #fff; }
+
+/* Pills and status -------------------------------------------------------- */
+
+.pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 9px;
+  border-radius: 999px;
+  font-size: 11.5px;
+  font-weight: 500;
+  border: 1px solid var(--line);
+  background: var(--panel-2);
+  color: var(--ink-2);
+  white-space: nowrap;
+}
+.pill.ok   { color: var(--green); border-color: color-mix(in srgb, var(--green) 40%, transparent); }
+.pill.warn { color: var(--amber); border-color: color-mix(in srgb, var(--amber) 40%, transparent); }
+.pill.bad  { color: var(--red);   border-color: color-mix(in srgb, var(--red) 40%, transparent); }
+
+/* Log --------------------------------------------------------------------- */
+
+.log {
+  font-family: var(--mono);
+  font-size: 12px;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 12px;
+  max-height: 340px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.log .lvl { color: var(--ink-3); }
+.log .lvl.ERROR { color: var(--red); }
+.log .lvl.WARN { color: var(--amber); }
+
+pre.doc {
+  font-family: var(--mono);
+  font-size: 12px;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 14px;
+  overflow: auto;
+  max-height: 640px;
+  margin: 0;
+}
+
+/* Sparkline --------------------------------------------------------------- */
+
+.spark { display: block; width: 100%; height: 64px; }
+.spark path { fill: none; stroke: var(--accent); stroke-width: 1.5; }
+.spark .area { fill: color-mix(in srgb, var(--accent) 14%, transparent); stroke: none; }
+
+/* Misc -------------------------------------------------------------------- */
+
+.muted { color: var(--ink-2); }
+.empty { color: var(--ink-3); padding: 28px 0; text-align: center; }
+.error {
+  background: color-mix(in srgb, var(--red) 10%, var(--panel));
+  border: 1px solid color-mix(in srgb, var(--red) 35%, transparent);
+  color: var(--red);
+  padding: 10px 14px;
+  border-radius: 6px;
+  margin-bottom: 16px;
+}
+.row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+.spread { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; }
+
+/* Token gate -------------------------------------------------------------- */
+
+.gate { max-width: 380px; margin: 12vh auto; }
+.gate input {
+  width: 100%;
+  font: inherit;
+  font-family: var(--mono);
+  padding: 9px 12px;
+  border-radius: 6px;
+  border: 1px solid var(--line);
+  background: var(--panel);
+  color: var(--ink);
+  margin: 10px 0;
+}

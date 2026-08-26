@@ -151,6 +151,14 @@ type Store interface {
 	PutIfMatch(ctx context.Context, key string, b []byte, etag string) (ObjectInfo, bool, error)
 }
 
+// Presigner is implemented by stores that can hand out a time-limited URL to
+// one object. It is deliberately not part of Store: it is an S3 idea, and the
+// backup pipeline never needs it — only the UI's download button does, which
+// asks for it with a type assertion and does without when the answer is no.
+type Presigner interface {
+	Presign(ctx context.Context, key string, ttl time.Duration) (string, error)
+}
+
 // ErrNotFound is returned by a Store when an object does not exist. Callers
 // distinguish "this backup is gone" from "the bucket is unreachable" with
 // errors.Is, never by matching provider-specific error text.

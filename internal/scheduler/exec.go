@@ -188,6 +188,9 @@ func (e *Executor) backup(ctx context.Context, target *config.Target, result Res
 		result.Err = err
 		return result
 	}
+	// This run's logger, not the process-wide one: it is what the UI shows
+	// beside the button somebody pressed.
+	runner.Log = e.log()
 
 	m, err := runner.Run(ctx, spec)
 	if err != nil {
@@ -226,6 +229,7 @@ func (e *Executor) prune(ctx context.Context, target *config.Target) {
 		log.WarnContext(ctx, "retention was not applied", "error", err)
 		return
 	}
+	runner.Log = log
 
 	plan, _, err := runner.Plan(ctx)
 	if err != nil {
@@ -280,6 +284,7 @@ func (e *Executor) verify(ctx context.Context, target *config.Target, job Job, r
 		result.Err = err
 		return result
 	}
+	verifier.Log = e.log()
 
 	outcome, err := verifier.Backup(ctx, entry, level)
 	if err != nil {

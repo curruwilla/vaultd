@@ -81,18 +81,19 @@ func newServeCommand(g *globals) *cobra.Command {
 			recorder := metrics.New()
 			seedMetrics(cmd.Context(), application, recorder, g)
 
+			exec := &scheduler.Executor{
+				App:        application,
+				Log:        g.logger,
+				Metrics:    recorder,
+				Identities: identities,
+				Prune:      !d.noPrune,
+				LockTTL:    d.lockTTL,
+			}
 			sched := &scheduler.Scheduler{
 				Jobs:     jobs,
 				Interval: interval,
 				Log:      g.logger,
-				Exec: &scheduler.Executor{
-					App:        application,
-					Log:        g.logger,
-					Metrics:    recorder,
-					Identities: identities,
-					Prune:      !d.noPrune,
-					LockTTL:    d.lockTTL,
-				},
+				Exec:     exec,
 			}
 
 			http := &server.Server{
@@ -100,6 +101,10 @@ func newServeCommand(g *globals) *cobra.Command {
 				Metrics: recorder,
 				Log:     g.logger,
 				Status:  statusOf(sched, jobs),
+				// The UI's buttons run through the same executor the schedule
+				// does, so a run somebody started by hand takes the same lock
+				// and lands in the same index.
+				Exec: exec,
 			}
 
 			g.printSchedule(sched, jobs)

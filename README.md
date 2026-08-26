@@ -268,7 +268,7 @@ Opting out is legal, but it is a line in the YAML that a reviewer can see.
 | `vaultd verify [id]` | ready — integrity, structural and restore (`--gc` collects leftovers) |
 | `vaultd restore <id> --to <dsn>` | ready |
 | `vaultd doctor [target...]` | ready — clients, databases, bucket, notifiers |
-| `vaultd serve` | ready — scheduler, locks, metrics, API |
+| `vaultd serve` | ready — scheduler, locks, metrics, API, UI |
 | `vaultd run` | ready — one-shot for a CronJob or a timer |
 
 ## Running it as a daemon
@@ -303,7 +303,8 @@ the index once the lock is held.
 | `/healthz` | open | liveness — the process is up. Never depends on the bucket |
 | `/readyz` | open | readiness — the config is valid and the destinations answer |
 | `/metrics` | token | Prometheus |
-| `/api/…` | token | the read-only API the UI is built on |
+| `/api/…` | token | the API the UI is built on |
+| `/` | open shell | the UI — it carries no data, and every byte it shows comes from `/api` |
 
 The probes are open on purpose: a liveness check that needs a secret fails when
 the secret is rotated. Everything else is behind `server.auth.token`, as a
@@ -313,6 +314,35 @@ Prometheus reads it with `authorization: { credentials_file: … }`.
 `on_overlap` decides what happens when a run is still going at its next slot:
 `skip` (default), `queue` (run it once the current one finishes) or `fail`.
 Either way the event is `schedule.missed`.
+
+## The UI
+
+`server.ui: true` serves a single-page app from the same address, compiled into
+the binary — nothing to mount, nothing to keep in step with a deployment, and
+nothing loaded from a CDN.
+
+- **Overview** — a card per target with a traffic light. Red is a rule, not a
+  feeling: the most recent run failed, or the newest backup is past its
+  `max_age` (the `max_age` assertion if one is declared, otherwise twice the
+  schedule's own interval). Amber is a verification that failed, or a backup
+  nothing has verified yet. Every colour carries its reason.
+- **Target** — the timeline of runs, failures included, with what the next
+  prune would keep and delete. *Back up now* and *Verify now* run through the
+  same executor the schedule uses, so they take the same lock and land in the
+  same index, with the run's own log streamed back beside the button.
+- **Backup** — the manifest, the verification result and its assertions, a
+  *Download* that hands back a five-minute presigned URL (the daemon never
+  proxies the bytes and the browser never sees a bucket credential), and
+  *Copy restore command*.
+- **Config** — the effective configuration re-rendered as YAML with every
+  secret replaced by `***`, plus `doctor` on demand.
+
+Pruning from the UI requires the dry run first, and applying sends back a
+digest of the exact plan that was shown: if a backup finished in between, the
+digest no longer matches and the new plan is shown instead.
+
+**Restoring into production is not in the UI** (SPEC §13). It is a CLI command
+with `--confirm`, and the UI's contribution is the command to paste.
 
 ## Notifications and metrics
 
@@ -412,7 +442,7 @@ internal/notify/     webhook delivery: signing, retry, dedup, chat templates
 internal/lock/       the per-target lease in the bucket: acquire, heartbeat, release
 internal/scheduler/  what is due, and the one execution path all modes share
 internal/prune/      applying a retention plan: objects first, index second
-internal/server/     HTTP: probes, metrics, the read-only API, the UI
+internal/server/     HTTP: probes, metrics, the API, the embedded UI
 internal/metrics/    the Prometheus collectors
 internal/doctor/     the network half of the config check
 internal/app/        config to adapters, the wiring layer
@@ -420,6 +450,7 @@ internal/cli/        the cobra command tree
 internal/buildinfo/  version stamped at link time
 internal/logging/    slog setup
 test/e2e/            acceptance tests against real containers and real R2
+web/                 the single-page UI, embedded with go:embed
 examples/            example config and demo environment
 ```
 

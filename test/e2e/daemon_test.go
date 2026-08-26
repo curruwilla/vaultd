@@ -4,6 +4,7 @@ package e2e_test
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"net"
 	"net/http"
@@ -57,8 +58,15 @@ server:
 func storedBackups(t *testing.T, bucket string) []manifest.Entry {
 	t.Helper()
 
+	store := newStore(t, bucket)
+	if _, err := store.Head(t.Context(), "e2e/_index/prod-pg.jsonl"); err != nil {
+		// No index yet is no backups yet, which is a perfectly good answer to
+		// the question and not a reason to fail the test.
+		return nil
+	}
+
 	var stored []manifest.Entry
-	for _, entry := range indexEntries(t, newStore(t, bucket), "e2e/_index/prod-pg.jsonl") {
+	for _, entry := range indexEntries(t, store, "e2e/_index/prod-pg.jsonl") {
 		if entry.Succeeded() {
 			stored = append(stored, entry)
 		}
@@ -179,6 +187,25 @@ func TestServeServesProbesMetricsAndAPI(t *testing.T) {
 	assert.NotContains(t, body, "t0ken")
 	assert.NotContains(t, body, env.secretKey)
 
+	// The UI shell loads without a token — it has to, before it can ask for
+	// one — and a deep link reloads into the app rather than a 404.
+	assert.Contains(t, fetch(t, base+"/", ""), "<title>vaultd</title>")
+	assert.Contains(t, fetch(t, base+"/t/prod-pg", ""), "<title>vaultd</title>")
+	assert.Contains(t, fetch(t, base+"/app.js", ""), "vaultd UI")
+
+	// "Back up now" goes through the same executor the schedule does, takes
+	// the same lock and lands in the same index — which is why it may find
+	// the daemon's own first-tick run already holding the target. Either way
+	// the button starts a run that finishes, and one backup exists after it.
+	run := postJSON(t, base+"/api/targets/prod-pg/backup", "t0ken")
+	id, ok := run["id"].(string)
+	require.True(t, ok, "the response has to name the run to watch: %v", run)
+
+	finished := awaitRun(t, base, id)
+	assert.Contains(t, []any{"succeeded", "skipped"}, finished["state"], "%v", finished)
+
+	awaitBackup(t, "vaultd-e2e-serve")
+
 	stop()
 	select {
 	case err := <-done:
@@ -186,6 +213,60 @@ func TestServeServesProbesMetricsAndAPI(t *testing.T) {
 	case <-time.After(30 * time.Second):
 		t.Fatal("the daemon did not shut down")
 	}
+}
+
+func postJSON(t *testing.T, url, token string) map[string]any {
+	t.Helper()
+
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, url, nil)
+	require.NoError(t, err)
+	req.Header.Set("Authorization", "Bearer "+token)
+
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusAccepted, resp.StatusCode, string(body))
+
+	var out map[string]any
+	require.NoError(t, json.Unmarshal(body, &out))
+	return out
+}
+
+// awaitBackup waits for a backup to land, which the daemon may be taking on
+// its own schedule at the same moment the test asks for one.
+func awaitBackup(t *testing.T, bucket string) {
+	t.Helper()
+
+	deadline := time.Now().Add(2 * time.Minute)
+	for time.Now().Before(deadline) {
+		if len(storedBackups(t, bucket)) > 0 {
+			return
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	t.Fatal("no backup was stored")
+}
+
+func awaitRun(t *testing.T, base, id string) map[string]any {
+	t.Helper()
+
+	deadline := time.Now().Add(2 * time.Minute)
+	for time.Now().Before(deadline) {
+		var run map[string]any
+		require.NoError(t, json.Unmarshal([]byte(fetch(t, base+"/api/runs/"+id, "t0ken")), &run))
+
+		if run["state"] != "running" {
+			return run
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+
+	t.Fatalf("run %s never finished", id)
+	return nil
 }
 
 // freePort reserves a port by binding it and letting go, which is close enough
