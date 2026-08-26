@@ -1,0 +1,196 @@
+# vaultd on Kubernetes: the daemon, and the one-shot form for anyone who would
+# rather let the cluster own the schedule.
+#
+# Both are shown because both are supported (decision D4) and they share the
+# same lock: running the Deployment and the CronJob at once is safe, if
+# pointless. Pick one.
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: vaultd
+---
+# The credentials. In a real cluster these come from External Secrets, Vault or
+# the cloud provider's own secret store — never from a manifest in git.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: vaultd-env
+  namespace: vaultd
+type: Opaque
+stringData:
+  R2_ACCESS_KEY_ID: replace-me
+  R2_SECRET_ACCESS_KEY: replace-me
+  CF_ACCOUNT_ID: replace-me
+  PROD_PG_DSN: postgres://backup:replace-me@postgres.default.svc:5432/app
+  VAULTD_AGE_RECIPIENT: age1replace-me
+  VAULTD_UI_TOKEN: replace-me
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: vaultd-config
+  namespace: vaultd
+data:
+  vaultd.yaml: |
+    version: 1
+    defaults:
+      compression: { algo: zstd, level: 3, long: true }
+      encryption: { mode: age, recipients: ["${VAULTD_AGE_RECIPIENT}"] }
+      retention: { daily: { keep: 7 }, weekly: { keep: 4, on: sunday }, monthly: { keep: 6 }, min_keep: 3 }
+      timeout: 4h
+    destinations:
+      - name: r2
+        provider: r2
+        bucket: db-backups
+        endpoint: https://${CF_ACCOUNT_ID}.r2.cloudflarestorage.com
+        region: auto
+        access_key_id: ${R2_ACCESS_KEY_ID}
+        secret_access_key: ${R2_SECRET_ACCESS_KEY}
+        prefix: prod
+    targets:
+      - name: prod-pg
+        engine: postgres
+        dsn: ${PROD_PG_DSN}
+        destination: r2
+        schedule: "0 3 * * *"
+    server:
+      listen: ":8080"
+      ui: true
+      metrics: true
+      auth: { mode: token, token: "${VAULTD_UI_TOKEN}" }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vaultd
+  namespace: vaultd
+spec:
+  # Two replicas is safe — the per-target lock in the bucket is what keeps them
+  # from running the same backup twice — but one is enough, and a second only
+  # buys a faster recovery from a node failure.
+  replicas: 1
+  strategy:
+    # Never two dumps of the same database during a rollout. The lock would
+    # stop the second anyway; this stops it from even trying.
+    type: Recreate
+  selector:
+    matchLabels: { app: vaultd }
+  template:
+    metadata:
+      labels: { app: vaultd }
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: vaultd
+          image: ghcr.io/curruwilla/vaultd:latest
+          args: ["serve"]
+          envFrom:
+            - secretRef: { name: vaultd-env }
+          env:
+            - name: VAULTD_LOG_FORMAT
+              value: json
+          ports:
+            - name: http
+              containerPort: 8080
+          volumeMounts:
+            - name: config
+              mountPath: /etc/vaultd
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+          # Liveness never depends on the bucket: restarting a healthy daemon
+          # every time S3 has a bad minute makes an outage worse.
+          livenessProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 30
+          # Readiness does, which is what a rollout should wait on.
+          readinessProbe:
+            httpGet: { path: /readyz, port: http }
+            periodSeconds: 15
+          resources:
+            requests: { cpu: 100m, memory: 128Mi }
+            # Memory is bounded by the compressor window and the uploader's
+            # in-flight parts, not by the size of the database (objective O2).
+            limits: { memory: 512Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+          # A dump that is killed mid-stream leaves a lock behind until its
+          # lease expires. Give the process time to finish and release it.
+          terminationMessagePolicy: FallbackToLogsOnError
+      terminationGracePeriodSeconds: 300
+      volumes:
+        - name: config
+          configMap: { name: vaultd-config }
+        - name: tmp
+          emptyDir: { medium: Memory, sizeLimit: 64Mi }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vaultd
+  namespace: vaultd
+  labels: { app: vaultd }
+spec:
+  selector: { app: vaultd }
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+---
+# The alternative to the Deployment: let the cluster own the schedule.
+# `vaultd run` works out what is due from the same config and the same index,
+# takes the same lock, and exits.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: vaultd-run
+  namespace: vaultd
+spec:
+  schedule: "*/15 * * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 5
+  suspend: true # enable this or the Deployment, not both
+  jobTemplate:
+    spec:
+      backoffLimit: 0 # a failed dump is reported, not retried blindly (SPEC §11)
+      template:
+        spec:
+          restartPolicy: Never
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            seccompProfile: { type: RuntimeDefault }
+          containers:
+            - name: vaultd
+              image: ghcr.io/curruwilla/vaultd:latest
+              args: ["run"]
+              envFrom:
+                - secretRef: { name: vaultd-env }
+              env:
+                - name: VAULTD_LOG_FORMAT
+                  value: json
+              volumeMounts:
+                - name: config
+                  mountPath: /etc/vaultd
+                  readOnly: true
+                - name: tmp
+                  mountPath: /tmp
+              resources:
+                requests: { cpu: 100m, memory: 128Mi }
+                limits: { memory: 512Mi }
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities: { drop: ["ALL"] }
+          volumes:
+            - name: config
+              configMap: { name: vaultd-config }
+            - name: tmp
+              emptyDir: { medium: Memory, sizeLimit: 64Mi }

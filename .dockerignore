@@ -1,0 +1,18 @@
+# The build needs the module and the source; nothing else belongs in the
+# context, least of all a local config or an unpacked client cache.
+.git
+.github
+.cache
+.idea
+.vscode
+bin
+dist
+web/node_modules
+coverage.out
+coverage.html
+*.env
+!examples/example.env
+vaultd.yaml
+*.age
+*.key
+SPEC.md

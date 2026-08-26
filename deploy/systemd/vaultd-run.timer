@@ -1,0 +1,14 @@
+# The one-shot alternative to the daemon: let systemd own the schedule.
+# `vaultd run` works out what is due from the same config and the same index,
+# takes the same lock, and exits. Enable this or vaultd.service, not both.
+
+[Unit]
+Description=Run every vaultd target that is due
+
+[Timer]
+OnCalendar=*:0/15
+Persistent=yes
+RandomizedDelaySec=60
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,127 @@
+# GoReleaser builds the standalone binaries (SPEC §3, secondary distribution).
+#
+# The container image is the primary one, because vaultd shells out to the
+# vendors' dump clients and the image is where those are pinned. A standalone
+# binary is for a host that already has them — `vaultd doctor` reports what it
+# found and what is missing.
+#
+# Everything a supply chain needs comes out of this file: checksums, an SBOM
+# per artifact, and keyless cosign signatures over both (SPEC §15).
+version: 2
+
+project_name: vaultd
+
+before:
+  hooks:
+    - go mod download
+    - go mod verify
+
+builds:
+  - id: vaultd
+    main: ./cmd/vaultd
+    binary: vaultd
+    env:
+      # Every dependency is pure Go — including the PostgreSQL driver — so the
+      # binary is static and needs no libc on the host it lands on.
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+      - -X github.com/curruwilla/vaultd/internal/buildinfo.Version={{ .Version }}
+      - -X github.com/curruwilla/vaultd/internal/buildinfo.Commit={{ .FullCommit }}
+      - -X github.com/curruwilla/vaultd/internal/buildinfo.Date={{ .CommitDate }}
+    # The build is reproducible: the timestamp comes from the commit rather
+    # than from the clock of whatever machine ran the release.
+    mod_timestamp: "{{ .CommitTimestamp }}"
+    goos: [linux, darwin]
+    goarch: [amd64, arm64]
+
+archives:
+  - id: vaultd
+    formats: [tar.gz]
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+    files:
+      - README.md
+      - LICENSE
+      - src: examples/config.yaml
+        dst: examples/config.yaml
+
+checksum:
+  name_template: "checksums.txt"
+  algorithm: sha256
+
+sboms:
+  - id: archive
+    artifacts: archive
+
+signs:
+  # Keyless: the signature is bound to the GitHub Actions workflow identity
+  # that produced it, so there is no private key to protect or rotate. Verify
+  # with:
+  #   cosign verify-blob --certificate <artifact>.pem \
+  #     --signature <artifact>.sig \
+  #     --certificate-identity-regexp 'https://github.com/curruwilla/vaultd/.*' \
+  #     --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  #     <artifact>
+  - id: cosign
+    cmd: cosign
+    signature: "${artifact}.sig"
+    certificate: "${artifact}.pem"
+    args:
+      - sign-blob
+      - "--output-signature=${signature}"
+      - "--output-certificate=${certificate}"
+      - "${artifact}"
+      - "--yes"
+    artifacts: checksum
+    output: true
+
+changelog:
+  use: github
+  sort: asc
+  groups:
+    - title: Features
+      regexp: '^.*?feat(\(.+\))??!?:.+$'
+      order: 0
+    - title: Fixes
+      regexp: '^.*?fix(\(.+\))??!?:.+$'
+      order: 1
+    - title: Other
+      order: 99
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+      - "^ci:"
+
+release:
+  draft: false
+  prerelease: auto
+  footer: |
+    ## Container images
+
+    ```
+    docker pull ghcr.io/curruwilla/vaultd:{{ .Tag }}          # every client, multi-engine
+    docker pull ghcr.io/curruwilla/vaultd:{{ .Tag }}-pg17     # one engine, ~120MB
+    ```
+
+    Images are `linux/amd64` and `linux/arm64`, signed with cosign and carrying
+    an SBOM and provenance attestation.
+
+    ## Verifying a download
+
+    ```
+    cosign verify-blob --certificate checksums.txt.pem \
+      --signature checksums.txt.sig \
+      --certificate-identity-regexp 'https://github.com/curruwilla/vaultd/.*' \
+      --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+      checksums.txt
+    sha256sum -c checksums.txt --ignore-missing
+    ```
+
+    **A standalone binary needs the database clients on the host.** Run
+    `vaultd doctor` after installing: it reports which are present, which are
+    missing, and what to install.

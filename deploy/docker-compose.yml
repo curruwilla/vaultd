@@ -1,0 +1,62 @@
+# vaultd as a daemon, with Docker Compose.
+#
+#   docker compose --env-file vaultd.env up -d
+#
+# Nothing here holds a secret: every credential arrives from the environment,
+# and the config is mounted read-only. The bucket is the state, so this stack
+# has no volume worth backing up — which is the point.
+
+services:
+  vaultd:
+    image: ghcr.io/curruwilla/vaultd:latest
+    restart: unless-stopped
+    command: ["serve"]
+
+    environment:
+      # Storage.
+      CF_ACCOUNT_ID: ${CF_ACCOUNT_ID:?set CF_ACCOUNT_ID}
+      R2_ACCESS_KEY_ID: ${R2_ACCESS_KEY_ID:?set R2_ACCESS_KEY_ID}
+      R2_SECRET_ACCESS_KEY: ${R2_SECRET_ACCESS_KEY:?set R2_SECRET_ACCESS_KEY}
+
+      # Databases. Use a dedicated read-only user per target (SPEC §15).
+      PROD_PG_DSN: ${PROD_PG_DSN:?set PROD_PG_DSN}
+
+      # The public half of the age key pair. The private half stays off this
+      # host on purpose: a backup server that cannot read its own backups is
+      # the feature, not the bug.
+      VAULTD_AGE_RECIPIENT: ${VAULTD_AGE_RECIPIENT:?set VAULTD_AGE_RECIPIENT}
+
+      # UI and notifications.
+      VAULTD_UI_TOKEN: ${VAULTD_UI_TOKEN:?set VAULTD_UI_TOKEN}
+      OPS_WEBHOOK_URL: ${OPS_WEBHOOK_URL:-}
+      OPS_WEBHOOK_SECRET: ${OPS_WEBHOOK_SECRET:-}
+
+      VAULTD_LOG_FORMAT: json
+
+    volumes:
+      - ./vaultd.yaml:/etc/vaultd/vaultd.yaml:ro
+
+    ports:
+      - "127.0.0.1:8080:8080"
+
+    # vaultd writes nothing to its filesystem: the dump streams straight to the
+    # bucket, and the only local writes are temporary files the clients make.
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+
+    # No healthcheck here: the image carries no HTTP client, and one that only
+    # proved the binary can print its version would be worse than none. Point a
+    # monitor at /healthz (liveness) and /readyz (config valid, bucket
+    # reachable) on the published port.
+
+    # Memory is bounded by the compressor window and the uploader's in-flight
+    # parts, not by the size of the database (objective O2). 256MB is the
+    # design target; the limit is here to make a regression loud.
+    deploy:
+      resources:
+        limits:
+          memory: 512M

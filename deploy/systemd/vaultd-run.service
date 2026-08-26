@@ -1,0 +1,26 @@
+[Unit]
+Description=vaultd — run every target that is due
+Documentation=https://github.com/curruwilla/vaultd
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/vaultd run --config /etc/vaultd/vaultd.yaml
+EnvironmentFile=/etc/vaultd/vaultd.env
+
+User=vaultd
+Group=vaultd
+
+# A dump is not retried blindly: the failure is classified and reported, and
+# the next timer firing is the retry (SPEC §11).
+TimeoutStartSec=6h
+
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictSUIDSGID=yes
+CapabilityBoundingSet=
+MemoryMax=512M

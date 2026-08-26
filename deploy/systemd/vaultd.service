@@ -1,0 +1,57 @@
+# vaultd as a systemd service, for a host that already has the database
+# clients. `vaultd doctor` reports which are present and which are missing.
+#
+#   sudo install -m 0644 vaultd.service /etc/systemd/system/
+#   sudo systemctl enable --now vaultd
+
+[Unit]
+Description=vaultd — database backups to S3-compatible storage
+Documentation=https://github.com/curruwilla/vaultd
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+ExecStart=/usr/local/bin/vaultd serve --config /etc/vaultd/vaultd.yaml
+
+# Credentials arrive from the environment, never from the config file. Keep
+# this readable only by root: it is the one file on the host that holds them.
+EnvironmentFile=/etc/vaultd/vaultd.env
+
+User=vaultd
+Group=vaultd
+DynamicUser=no
+
+Restart=on-failure
+RestartSec=10s
+
+# A dump that is killed mid-stream leaves a lock behind until its lease
+# expires. Give the process time to finish the one it is on and release it.
+KillSignal=SIGTERM
+TimeoutStopSec=300
+
+# vaultd writes nothing it needs to keep: the dump streams straight to the
+# bucket, and the bucket is the state.
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+CapabilityBoundingSet=
+
+# Bounded by the compressor window and the uploader's in-flight parts, not by
+# the size of the database (objective O2).
+MemoryMax=512M
+
+[Install]
+WantedBy=multi-user.target

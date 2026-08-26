@@ -4,16 +4,11 @@ Database backups to S3-compatible storage. One Go binary, one declarative config
 streaming dumps of MySQL/MariaDB, PostgreSQL and MongoDB, zstd compression, age
 encryption, GFS retention and real restore verification.
 
-**Status: M5.** All four engines back up end to end — PostgreSQL, MySQL,
-MariaDB and MongoDB — old backups expire on a GFS retention policy, and a
-stored backup can be checked, restored, and proven to restore. `vaultd backup`
-streams a dump through compression and age encryption into an S3-compatible
-bucket and writes a manifest beside it; `vaultd list` reads the index back;
-`vaultd prune` applies the policy; `vaultd verify` proves a backup still reads
-back — and, at level `restore`, that it comes back into a real server with the
-rows it claims; `vaultd restore` writes one into a database. Notifiers, metrics
-and the daemon follow. Commands that are not implemented yet are registered,
-document their flags, and fail with the milestone that brings them.
+**Status: feature complete for v0.1.** All four engines back up end to end —
+PostgreSQL, MySQL, MariaDB and MongoDB — old backups expire on a GFS retention
+policy, a stored backup can be checked and proven to restore, and `vaultd
+serve` runs the whole thing on a schedule with signed webhooks, Prometheus
+metrics and an embedded UI. Every command in SPEC §10 is implemented.
 
 | Engine | Client it drives | Consistency it achieves |
 | --- | --- | --- |
@@ -27,6 +22,44 @@ found: no replication position when the user lacks `RELOAD` and
 `REPLICATION CLIENT`, no oplog on a standalone MongoDB, no GTID purge on
 MariaDB. Passing a flag the server or the user cannot support makes the client
 abort partway through a dump, so the probe decides instead.
+
+## Install
+
+The container image is the primary distribution, because vaultd shells out to
+the vendors' own dump clients and the image is where those are pinned.
+
+```bash
+# Every client, for a config that backs up more than one engine (~450MB).
+docker pull ghcr.io/curruwilla/vaultd:latest
+
+# One engine, for the common single-database case (~120MB).
+docker pull ghcr.io/curruwilla/vaultd:latest-pg17
+#   …-pg14 …-pg15 …-pg16 …-pg17 …-pg18 …-mysql8 …-mariadb11 …-mongo7
+```
+
+The same binary is in all of them. `vaultd doctor` reports which variant it is
+running in, and a config naming an engine the image does not carry fails with
+the image to use instead rather than with a missing-file error.
+
+A standalone binary is the alternative, for a host that already has the
+clients:
+
+```bash
+# Verify before you run it. The signature is bound to the workflow that built
+# it, so there is no key to trust separately.
+cosign verify-blob --certificate checksums.txt.pem --signature checksums.txt.sig \
+  --certificate-identity-regexp 'https://github.com/curruwilla/vaultd/.*' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com checksums.txt
+sha256sum -c checksums.txt --ignore-missing
+
+tar xzf vaultd_*_linux_amd64.tar.gz
+sudo install -m 0755 vaultd /usr/local/bin/
+vaultd doctor          # says what is installed and what is missing
+```
+
+Ready-made deployments are in [`deploy/`](deploy/): a Compose stack, a
+Kubernetes Deployment with the CronJob alternative beside it, and systemd units
+for both modes.
 
 ## Quickstart
 
@@ -383,6 +416,29 @@ happened, and a backup tool fails by runs not happening at all.
 | `vaultd_verify_last_success_timestamp{target,level}` | gauge |
 | `vaultd_retention_objects{target,tier}` | gauge |
 
+## Releases
+
+A tag builds everything: static binaries for linux and darwin on amd64 and
+arm64, the nine image variants for `linux/amd64` and `linux/arm64`, an SBOM per
+artifact, and keyless cosign signatures over the checksums and the images. The
+images also carry a build-provenance attestation, so what produced them is
+verifiable without trusting the registry.
+
+The release workflow re-runs the gates against the tag itself — build, vet,
+race tests, `validate-example`, `govulncheck` — because a release is the one
+build nobody re-runs, and then smoke-tests the published images. Locally:
+
+```bash
+make release-check           # everything the workflow checks, before tagging
+make snapshot                # build the artifacts without publishing
+make docker ENGINE=pg17      # one image variant
+make docker-smoke            # …and check it reports its variant and clients
+```
+
+Three things are part of the contract and will not change without a major
+version: the exit codes (0 ok, 1 failure, 2 usage), the manifest schema, and
+the object key layout in the bucket. See [CHANGELOG.md](CHANGELOG.md).
+
 ## Development
 
 ```bash
@@ -452,6 +508,7 @@ internal/logging/    slog setup
 test/e2e/            acceptance tests against real containers and real R2
 web/                 the single-page UI, embedded with go:embed
 examples/            example config and demo environment
+deploy/              Compose, Kubernetes and systemd, ready to adapt
 ```
 
 Adapters live next to the port they implement: an engine under

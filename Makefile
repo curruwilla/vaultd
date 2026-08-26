@@ -14,7 +14,12 @@ PG_CLIENT_MAJOR   ?= 16
 MONGO_TOOLS_IMAGE ?= mongo:7
 CLIENTS_DIR       := $(CURDIR)/.cache/clients
 
-.PHONY: all build clean test test-race test-integration test-e2e cover fuzz lint lint-fix fmt vet audit validate-example dev-clients install deps-update help
+IMAGE   ?= ghcr.io/curruwilla/vaultd
+ENGINE  ?= all
+PLATFORMS ?= linux/amd64,linux/arm64
+
+.PHONY: all build clean test test-race test-integration test-e2e cover fuzz lint lint-fix fmt vet audit validate-example dev-clients install deps-update \
+        docker docker-all docker-smoke snapshot release-check help
 
 all: fmt lint test build
 
@@ -108,6 +113,45 @@ dev-clients:
 	@echo "  export PATH=$(CLIENTS_DIR)/bin:$$PATH"
 	@echo "  export LD_LIBRARY_PATH=$(CLIENTS_DIR)/pg/usr/lib/x86_64-linux-gnu:$(CLIENTS_DIR)/mariadb/usr/lib/x86_64-linux-gnu:$(CLIENTS_DIR)/mysql/usr/lib/x86_64-linux-gnu"
 	@echo "  export VAULTD_TEST_PG_IMAGE=postgres:$(PG_CLIENT_MAJOR)-alpine"
+
+## docker: Build the container image for this host (ENGINE=all|pg17|mysql8|…)
+docker:
+	docker build \
+		--build-arg ENGINE=$(ENGINE) \
+		--build-arg VERSION=$(VERSION) \
+		--build-arg COMMIT=$(COMMIT) \
+		--build-arg DATE=$(DATE) \
+		-t $(IMAGE):$(VERSION)$(if $(filter-out all,$(ENGINE)),-$(ENGINE)) .
+
+## docker-all: Build every image variant for every release platform (needs buildx)
+docker-all:
+	@for engine in all pg14 pg15 pg16 pg17 pg18 mysql8 mariadb11 mongo7; do \
+		suffix=$$([ "$$engine" = all ] && echo "" || echo "-$$engine"); \
+		echo "==> $(IMAGE):$(VERSION)$$suffix"; \
+		docker buildx build --platform $(PLATFORMS) \
+			--build-arg ENGINE=$$engine \
+			--build-arg VERSION=$(VERSION) \
+			--build-arg COMMIT=$(COMMIT) \
+			--build-arg DATE=$(DATE) \
+			-t $(IMAGE):$(VERSION)$$suffix . || exit 1; \
+	done
+
+## docker-smoke: Check that a built image reports its variant and finds its clients
+docker-smoke: docker
+	docker run --rm $(IMAGE):$(VERSION)$(if $(filter-out all,$(ENGINE)),-$(ENGINE)) version
+	docker run --rm -v $(CURDIR)/examples:/cfg:ro \
+		--env-file examples/example.env \
+		$(IMAGE):$(VERSION)$(if $(filter-out all,$(ENGINE)),-$(ENGINE)) validate -c /cfg/config.yaml
+
+## snapshot: Build the release artifacts locally, without publishing (needs goreleaser)
+snapshot:
+	goreleaser release --snapshot --clean --skip=sign,publish
+
+## release-check: Everything the release workflow runs, before tagging
+release-check: fmt lint test validate-example
+	$(GO) test -race ./...
+	$(GO) run golang.org/x/vuln/cmd/govulncheck@latest ./...
+	goreleaser check
 
 ## install: Download and tidy dependencies
 install:
