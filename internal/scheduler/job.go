@@ -47,6 +47,10 @@ type Job struct {
 	Schedule cron.Schedule
 	// Level is the verification level, for a verify job.
 	Level config.VerifyLevel
+	// Tier is the label to record on a backup's manifest. Empty means the
+	// default; it is only a label either way, since which tiers actually keep
+	// a backup is computed at prune time (SPEC §7).
+	Tier string
 }
 
 // Key identifies a job for bookkeeping.

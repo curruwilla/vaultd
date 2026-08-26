@@ -290,19 +290,21 @@ Opting out is legal, but it is a line in the YAML that a reviewer can see.
 
 ## Commands
 
-| Command | Status |
+| Command | What it does |
 | --- | --- |
-| `vaultd validate` | ready |
-| `vaultd version` | ready |
-| `vaultd backup <target>` | ready — PostgreSQL, MySQL, MariaDB, MongoDB |
-| `vaultd list [target]` | ready |
-| `vaultd prune <target>` | ready — dry run unless `--apply` |
-| `vaultd reindex <target>` | ready |
-| `vaultd verify [id]` | ready — integrity, structural and restore (`--gc` collects leftovers) |
-| `vaultd restore <id> --to <dsn>` | ready |
-| `vaultd doctor [target...]` | ready — clients, databases, bucket, notifiers |
-| `vaultd serve` | ready — scheduler, locks, metrics, API, UI |
-| `vaultd run` | ready — one-shot for a CronJob or a timer |
+| `vaultd validate` | Parse, merge defaults, check everything that does not need a socket |
+| `vaultd doctor [target...]` | The half that does: clients, databases, bucket, notifiers |
+| `vaultd backup <target>` | Back one target up now, under the same lock the daemon takes |
+| `vaultd list [target]` | The backups of a target, newest first |
+| `vaultd verify [id]` | `--level integrity`, `structural` or `restore`; `--gc` collects leftovers |
+| `vaultd restore <id> --to <dsn>` | Write a backup into an explicit destination, with `--confirm` |
+| `vaultd prune <target>` | Apply the retention policy; dry run unless `--apply` |
+| `vaultd reindex <target>` | Rebuild the listing cache from the manifests in the bucket |
+| `vaultd serve` | The daemon: scheduler, locks, metrics, API, UI |
+| `vaultd run` | Everything that is due, once, then exit |
+| `vaultd version` | What this build is |
+
+Exit codes are a contract: **0** ok, **1** failure, **2** usage.
 
 ## Running it as a daemon
 

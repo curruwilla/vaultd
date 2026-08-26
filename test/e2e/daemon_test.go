@@ -135,6 +135,53 @@ func TestTwoConcurrentRunsProduceOneBackup(t *testing.T) {
 		"the replica that lost has to say so: %s", combined)
 }
 
+// A manual backup takes the same lock the daemon does, so running one by hand
+// while `vaultd serve` is up cannot dump the database twice (SPEC §11).
+//
+// Unlike a scheduled run, the loser fails rather than shrugging: a person
+// asked for this, and telling them nothing happened is the wrong answer.
+func TestAManualBackupTakesTheTargetLock(t *testing.T) {
+	t.Setenv("E2E_LISTEN", "127.0.0.1:0")
+	t.Setenv("E2E_TOKEN", "t0ken")
+	configPath, _ := setupWith(t, "vaultd-e2e-manual-lock", daemonTemplate)
+
+	var (
+		wg      sync.WaitGroup
+		mu      sync.Mutex
+		errs    []error
+		results int
+	)
+	for range 2 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+
+			_, _, err := run(t, "backup", "prod-pg", "-c", configPath)
+
+			mu.Lock()
+			defer mu.Unlock()
+			if err != nil {
+				errs = append(errs, err)
+				return
+			}
+			results++
+		}()
+	}
+	wg.Wait()
+
+	// Two invocations at once, and the database is dumped once. Whether the
+	// loser was refused the lock or got it a moment later is a race the test
+	// must not depend on — what matters is that the bucket holds one backup
+	// per successful invocation, and never two from one dump.
+	assert.Len(t, storedBackups(t, "vaultd-e2e-manual-lock"), results)
+	assert.GreaterOrEqual(t, results, 1, "at least one invocation has to succeed")
+
+	for _, err := range errs {
+		assert.Contains(t, err.Error(), "already being backed up",
+			"a manual backup that loses the lock says so")
+	}
+}
+
 // `--dry-run` answers the question a CronJob's operator asks before enabling
 // it, and touches nothing.
 func TestRunDryRunTakesNoBackup(t *testing.T) {

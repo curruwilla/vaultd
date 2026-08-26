@@ -12,12 +12,15 @@ import (
 	"github.com/curruwilla/vaultd/internal/backup"
 	"github.com/curruwilla/vaultd/internal/config"
 	"github.com/curruwilla/vaultd/internal/manifest"
+	"github.com/curruwilla/vaultd/internal/scheduler"
 )
 
 func newBackupCommand(g *globals) *cobra.Command {
 	var (
-		dryRun bool
-		tier   string
+		dryRun  bool
+		prune   bool
+		tier    string
+		lockTTL time.Duration
 	)
 
 	cmd := &cobra.Command{
@@ -34,16 +37,17 @@ func newBackupCommand(g *globals) *cobra.Command {
 			}
 
 			application := app.New(cfg, g.logger)
-			spec, err := application.BackupSpec(target, tier)
-			if err != nil {
-				return err
-			}
-			runner, err := application.Runner(cmd.Context(), target)
-			if err != nil {
-				return err
-			}
 
 			if dryRun {
+				spec, err := application.BackupSpec(target, tier)
+				if err != nil {
+					return err
+				}
+				runner, err := application.Runner(cmd.Context(), target)
+				if err != nil {
+					return err
+				}
+
 				plan, err := runner.Plan(cmd.Context(), spec)
 				if err != nil {
 					return err
@@ -52,18 +56,39 @@ func newBackupCommand(g *globals) *cobra.Command {
 				return nil
 			}
 
-			m, err := runner.Run(cmd.Context(), spec)
-			if err != nil {
-				return err
+			// A manual backup goes through the same executor the daemon uses,
+			// which is what makes it take the same per-target lock: running
+			// this by hand while `vaultd serve` is up must not dump the
+			// database twice (SPEC §11).
+			exec := &scheduler.Executor{
+				App:     application,
+				Log:     g.logger,
+				Prune:   prune,
+				LockTTL: lockTTL,
 			}
 
-			g.printBackup(m)
+			job := scheduler.Manual(target.Name, scheduler.KindBackup)
+			job.Tier = tier
+
+			result := exec.Run(cmd.Context(), job)
+			switch {
+			case result.Err != nil:
+				return result.Err
+			case result.Outcome == scheduler.OutcomeLocked:
+				return fmt.Errorf("%s is already being backed up elsewhere: %s", target.Name, result.Detail)
+			}
+
+			g.printBackup(result.Manifest)
 			return nil
 		},
 	}
 
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "probe the server and report what would be written, without writing it")
 	cmd.Flags().StringVar(&tier, "tier", "daily", "retention tier to record on the backup")
+	cmd.Flags().BoolVar(&prune, "prune", false,
+		"apply the retention policy afterwards, as `vaultd serve` does")
+	cmd.Flags().DurationVar(&lockTTL, "lock-ttl", 0,
+		"how long this run's target lock lives without a heartbeat (default 5m)")
 
 	return cmd
 }

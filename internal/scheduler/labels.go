@@ -15,6 +15,14 @@ import (
 // as the weekly one whatever this says.
 const defaultTier = "daily"
 
+// tierOf is the label a job stamps on its manifest.
+func tierOf(job Job) string {
+	if job.Tier != "" {
+		return job.Tier
+	}
+	return defaultTier
+}
+
 // phaseOf is the phase a failed backup died in, for the failure counter. A
 // failure that carries no phase is attributed to the dump: it is by far the
 // most common, and an unlabelled counter is worse than a slightly wrong one.

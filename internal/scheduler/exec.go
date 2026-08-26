@@ -43,6 +43,8 @@ type Result struct {
 	Detail string `json:"detail,omitempty"`
 	// BackupID is set when a run produced or examined one.
 	BackupID string `json:"backup_id,omitempty"`
+	// Manifest is what a backup stored, for the caller that wants to print it.
+	Manifest *manifest.Manifest `json:"-"`
 	// Err is the failure, if the work itself failed. It is carried rather than
 	// returned so a daemon can log one target's failure and keep running the
 	// others.
@@ -146,7 +148,7 @@ func (e *Executor) Run(ctx context.Context, job Job) Result {
 
 	switch job.Kind {
 	case KindBackup:
-		result = e.backup(ctx, target, result)
+		result = e.backup(ctx, target, job, result)
 	case KindVerify:
 		result = e.verify(ctx, target, job, result)
 	default:
@@ -177,8 +179,8 @@ func (e *Executor) acquire(ctx context.Context, target *config.Target, job Job) 
 }
 
 // backup dumps the target and, when asked, applies its retention policy.
-func (e *Executor) backup(ctx context.Context, target *config.Target, result Result) Result {
-	spec, err := e.App.BackupSpec(target, defaultTier)
+func (e *Executor) backup(ctx context.Context, target *config.Target, job Job, result Result) Result {
+	spec, err := e.App.BackupSpec(target, tierOf(job))
 	if err != nil {
 		result.Err = err
 		return result
@@ -203,6 +205,7 @@ func (e *Executor) backup(ctx context.Context, target *config.Target, result Res
 
 	result.Outcome = OutcomeRan
 	result.BackupID = m.ID
+	result.Manifest = m
 	result.Detail = fmt.Sprintf("%d bytes stored at %s", m.Object.Bytes, m.Object.Key)
 
 	if e.Metrics != nil {
