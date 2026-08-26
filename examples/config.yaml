@@ -46,14 +46,23 @@ targets:
       exclude_table_data: ["public.audit_log", "public.sessions"]
       include_globals: true
     verify:
+      # Weekly: the backup is restored into a database of its own on
+      # staging-pg, these assertions run against it, and it is dropped.
       level: restore
       schedule: "0 5 * * 0"
       into: staging-pg
       assertions:
         - type: table_count
+        # Tables are named because exclude_table_data above leaves
+        # public.sessions with a schema and no rows on purpose.
+        #
+        # Row counts in a manifest are estimates (row_estimate: estimate), so
+        # this compares within a band: an exact comparison would measure the
+        # age of the server's statistics rather than the backup. Set
+        # row_estimate: exact to assert on real counts.
         - type: row_count
           tables: ["public.users", "public.orders"]
-          tolerance: 0
+          tolerance: 0.05
         - type: query
           sql: "select count(*) from users where email is null"
           expect: 0

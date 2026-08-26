@@ -3,6 +3,7 @@ package postgres
 import (
 	"errors"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -114,4 +115,53 @@ func extractParams(raw string) map[string]string {
 		}
 	}
 	return params
+}
+
+// reservedKeywords are the connection settings withDatabaseDSN writes itself.
+// Everything else the original DSN carried — TLS, timeouts, application
+// settings — rides along untouched.
+var reservedKeywords = map[string]bool{
+	"host": true, "hostaddr": true, "port": true,
+	"user": true, "password": true, "dbname": true,
+}
+
+// withDatabaseDSN renders this connection pointed at another database, in
+// libpq's keyword/value syntax.
+//
+// That syntax rather than a URL because it needs no percent-encoding: a
+// password holding a '/' or a '@' survives it unchanged, and the verify
+// target's credentials are not ours to re-encode.
+func (c connInfo) withDatabaseDSN(database string) string {
+	pairs := []string{
+		"host=" + quoteDSNValue(c.Host),
+		"port=" + quoteDSNValue(strconv.Itoa(int(c.Port))),
+		"dbname=" + quoteDSNValue(database),
+	}
+	if c.User != "" {
+		pairs = append(pairs, "user="+quoteDSNValue(c.User))
+	}
+	if c.Password != "" {
+		pairs = append(pairs, "password="+quoteDSNValue(c.Password))
+	}
+
+	extra := make([]string, 0, len(c.Params))
+	for key := range c.Params {
+		if !reservedKeywords[key] {
+			extra = append(extra, key)
+		}
+	}
+	sort.Strings(extra)
+	for _, key := range extra {
+		pairs = append(pairs, key+"="+quoteDSNValue(c.Params[key]))
+	}
+
+	return strings.Join(pairs, " ")
+}
+
+// quoteDSNValue renders one value the way libpq reads it back: single-quoted,
+// with backslashes and quotes escaped.
+func quoteDSNValue(value string) string {
+	escaped := strings.ReplaceAll(value, `\`, `\\`)
+	escaped = strings.ReplaceAll(escaped, `'`, `\'`)
+	return "'" + escaped + "'"
 }

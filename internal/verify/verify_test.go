@@ -315,17 +315,6 @@ func TestBackupRecordsAFailure(t *testing.T) {
 	assert.False(t, loaded.Entries[0].Verified())
 }
 
-func TestRestoreLevelIsNotHereYet(t *testing.T) {
-	store := memory.New()
-	identity := newIdentity(t)
-	m, _ := stored(t, store, identity, pgDump())
-
-	_, err := verifier(t, store, identity).Manifest(t.Context(), m, verify.LevelRestore)
-
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "M5")
-}
-
 func storedManifest(t *testing.T, store *memory.Store, key string) *manifest.Manifest {
 	t.Helper()
 

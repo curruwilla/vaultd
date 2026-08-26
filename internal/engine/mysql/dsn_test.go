@@ -81,3 +81,26 @@ func TestTLSDisabledLeavesTheClientDefault(t *testing.T) {
 		assert.NotContains(t, arg, "--ssl-mode")
 	}
 }
+
+// TestWithDatabase: a verify sandbox is a second database on the same server,
+// and the driver's own formatter is what keeps a password with a '/' or an '@'
+// in it intact.
+func TestWithDatabase(t *testing.T) {
+	info, err := parseDSN("mysql://vaultd:p%40ss%2Fword@staging:3306/mysql?tls=true")
+	require.NoError(t, err)
+
+	sandbox, err := info.withDatabase("vaultd_verify_01j")
+	require.NoError(t, err)
+
+	assert.Equal(t, "vaultd_verify_01j", sandbox.Database)
+	assert.Equal(t, "mysql", info.Database, "withDatabase must not mutate the original")
+
+	reparsed, err := parseDSN(sandbox.driverDSN)
+	require.NoError(t, err)
+	assert.Equal(t, "staging", reparsed.Host)
+	assert.Equal(t, 3306, reparsed.Port)
+	assert.Equal(t, "vaultd", reparsed.User)
+	assert.Equal(t, "p@ss/word", reparsed.Password)
+	assert.Equal(t, "vaultd_verify_01j", reparsed.Database)
+	assert.Contains(t, reparsed.args(), "--ssl-mode=REQUIRED")
+}

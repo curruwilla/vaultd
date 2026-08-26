@@ -163,3 +163,19 @@ func (c connInfo) tlsArgs() []string {
 func (c connInfo) env() map[string]string {
 	return map[string]string{"MYSQL_PWD": c.Password}
 }
+
+// withDatabase returns the same connection pointed at another database. The
+// driver's own parser and formatter do the work, so a password holding a '/'
+// or an '@' survives the round trip untouched.
+func (c connInfo) withDatabase(name string) (connInfo, error) {
+	cfg, err := mysql.ParseDSN(c.driverDSN)
+	if err != nil {
+		return connInfo{}, errors.New("the connection string is not valid MySQL syntax")
+	}
+	cfg.DBName = name
+
+	updated := c
+	updated.Database = name
+	updated.driverDSN = cfg.FormatDSN()
+	return updated, nil
+}

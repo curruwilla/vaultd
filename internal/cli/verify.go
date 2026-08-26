@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"slices"
 	"sort"
 	"text/tabwriter"
 
@@ -26,23 +28,22 @@ func newVerifyCommand(g *globals) *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "verify [backup-id]",
-		Short: "Verify a backup: that it is there, and that it reads back",
+		Short: "Verify a backup: that it is there, that it reads back, that it restores",
 		Long: "verify checks a stored backup against its manifest.\n\n" +
 			"  integrity   the objects exist and are the size the manifest records (one HEAD,\n" +
 			"              no egress)\n" +
 			"  structural  the object is read back in full, decrypted, decompressed and\n" +
-			"              compared byte for byte with the manifest\n\n" +
+			"              compared byte for byte with the manifest\n" +
+			"  restore     the backup is restored into a database of its own on the target's\n" +
+			"              verify target, the configured assertions run against it, and the\n" +
+			"              database is dropped\n\n" +
 			"The outcome is written onto the manifest and into the index, which is what\n" +
 			"stops prune from deleting the most recent verified backup.",
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if gc {
-				return errors.New("--gc collects leftover verify databases, which arrive with restore verification in milestone M5")
-			}
-
 			wanted := verify.Level(level)
-			if wanted != verify.LevelIntegrity && wanted != verify.LevelStructural {
-				return usageErrorf("unknown verify level %q; use integrity or structural", level)
+			if !slices.Contains(verify.Levels, wanted) {
+				return usageErrorf("unknown verify level %q; use integrity, structural or restore", level)
 			}
 
 			cfg, diags, err := g.load()
@@ -52,6 +53,12 @@ func newVerifyCommand(g *globals) *cobra.Command {
 			if diags.HasErrors() {
 				g.printDiagnostics(diags)
 				return fmt.Errorf("%s is invalid", g.configPath)
+			}
+
+			application := app.New(cfg, g.logger)
+
+			if gc {
+				return g.collectGarbage(cmd.Context(), application, cfg, trimmed(targetName))
 			}
 
 			identities, err := loadIdentities(identityFile)
@@ -66,8 +73,13 @@ func newVerifyCommand(g *globals) *cobra.Command {
 			if backupID == "" && targetName == "" {
 				return usageErrorf("name a backup id, or pass --target with --latest")
 			}
+			// Restoring every backup a target ever took is never what was
+			// meant: each one restores a whole database on the verify target.
+			if wanted == verify.LevelRestore && backupID == "" && !latest {
+				return usageErrorf(
+					"restore verification restores a whole backup into a live server; name a backup id, or pass --latest for the most recent one")
+			}
 
-			application := app.New(cfg, g.logger)
 			targets, err := selectTargets(cfg, trimmed(targetName))
 			if err != nil {
 				return err
@@ -83,7 +95,7 @@ func newVerifyCommand(g *globals) *cobra.Command {
 
 			failures := 0
 			for _, item := range work {
-				verifier, err := application.Verifier(cmd.Context(), item.target, identities)
+				verifier, err := application.Verifier(cmd.Context(), item.target, identities, wanted)
 				if err != nil {
 					return err
 				}
@@ -94,7 +106,10 @@ func newVerifyCommand(g *globals) *cobra.Command {
 				}
 
 				g.printVerification(item.target.Name, item.entry, result)
-				if !result.OK {
+				// A skipped check found nothing wrong; it found nothing at all.
+				// Exiting non-zero over it would break a nightly run for a
+				// staging server that is merely older than production.
+				if !result.OK && !result.Skipped {
 					failures++
 				}
 			}
@@ -108,10 +123,11 @@ func newVerifyCommand(g *globals) *cobra.Command {
 
 	cmd.Flags().StringVar(&targetName, "target", "", "verify backups of this target")
 	cmd.Flags().BoolVar(&latest, "latest", false, "with --target, verify only its most recent backup")
-	cmd.Flags().StringVar(&level, "level", string(verify.LevelIntegrity), "integrity or structural")
+	cmd.Flags().StringVar(&level, "level", string(verify.LevelIntegrity), "integrity, structural or restore")
 	cmd.Flags().StringVar(&identityFile, "identity-file", "",
 		"file holding the age private key that decrypts the backup (or set "+identityEnv+")")
-	cmd.Flags().BoolVar(&gc, "gc", false, "drop leftover verify databases from a crashed run")
+	cmd.Flags().BoolVar(&gc, "gc", false,
+		"drop the verify databases a crashed run left behind, and verify nothing")
 
 	return cmd
 }
@@ -178,7 +194,7 @@ func (g *globals) collect(
 
 func (g *globals) printVerification(target string, entry manifest.Entry, result verify.Result) {
 	out := g.out
-	if !result.OK {
+	if !result.OK && !result.Skipped {
 		out = g.err
 	}
 
@@ -188,6 +204,9 @@ func (g *globals) printVerification(target string, entry manifest.Entry, result 
 	fmt.Fprintf(w, "  backup\t%s (%s)\n", entry.ID, entry.FinishedAt.Format("2006-01-02 15:04Z"))
 	fmt.Fprintf(w, "  object\t%s\n", entry.Key)
 	fmt.Fprintf(w, "  level\t%s in %s\n", result.Level, humanDuration(result.Duration))
+	if database, ok := result.Details["verify_database"].(string); ok {
+		fmt.Fprintf(w, "  restored into\t%s\n", database)
+	}
 	if bytes, ok := result.Details["plaintext_bytes"].(int64); ok {
 		fmt.Fprintf(w, "  read back\t%s\n", humanBytes(bytes))
 	}
@@ -196,9 +215,72 @@ func (g *globals) printVerification(target string, entry manifest.Entry, result 
 	}
 	_ = w.Flush()
 
+	// The assertions are printed whether they passed or not: a row count that
+	// matched is the evidence the backup is restorable, and it is the reason
+	// the check was worth its egress.
+	if checks, ok := result.Details["assertions"].([]verify.Check); ok {
+		printChecks(out, checks)
+	}
+
 	for _, problem := range result.Problems {
 		fmt.Fprintf(g.err, "  problem: %s\n", problem)
 	}
+}
+
+func printChecks(out io.Writer, checks []verify.Check) {
+	if len(checks) == 0 {
+		return
+	}
+
+	fmt.Fprintf(out, "  assertions\n")
+	w := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
+	for _, check := range checks {
+		mark := "FAIL"
+		if check.OK {
+			mark = "ok"
+		}
+		fmt.Fprintf(w, "    %s\t%s\t%s\n", mark, check.Type, check.Detail)
+	}
+	_ = w.Flush()
+}
+
+// collectGarbage drops the verify databases left behind by runs that never got
+// to drop their own (SPEC §8). It verifies nothing: it is the repair, not the
+// check.
+func (g *globals) collectGarbage(ctx context.Context, application *app.App, cfg *config.Config, names []string) error {
+	targets, err := selectTargets(cfg, names)
+	if err != nil {
+		return err
+	}
+
+	collected := 0
+	for _, target := range targets {
+		if target.Verify == nil || target.Verify.Into == "" {
+			if len(names) > 0 {
+				return fmt.Errorf("target %q has no verify target; there is nothing for --gc to collect", target.Name)
+			}
+			continue
+		}
+
+		verifier, err := application.Verifier(ctx, target, nil, verify.LevelRestore)
+		if err != nil {
+			return err
+		}
+
+		dropped, err := verifier.CollectGarbage(ctx)
+		for _, database := range dropped {
+			fmt.Fprintf(g.out, "dropped %s on verify target %s\n", database, target.Verify.Into)
+		}
+		if err != nil {
+			return err
+		}
+		collected += len(dropped)
+	}
+
+	if collected == 0 {
+		fmt.Fprintf(g.out, "ok: no verify databases were left behind\n")
+	}
+	return nil
 }
 
 // trimmed turns an optional target name into the argument list selectTargets

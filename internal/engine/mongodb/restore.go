@@ -29,6 +29,12 @@ type RestoreOptions struct {
 	Drop                   bool
 	NumParallelCollections int
 	ProbeTimeout           time.Duration
+	// NSFrom and NSTo rename namespaces on the way in. mongorestore writes
+	// every collection back into the namespace the archive records, so
+	// restoring somewhere else — the ephemeral database a verification uses —
+	// is a rename rather than a destination.
+	NSFrom string
+	NSTo   string
 }
 
 // Restorer feeds a mongodump archive to mongorestore.
@@ -108,6 +114,9 @@ func (r *Restorer) Restore(ctx context.Context, src io.Reader) error {
 	}
 	if r.opts.Drop {
 		args = append(args, "--drop")
+	}
+	if r.opts.NSFrom != "" && r.opts.NSTo != "" {
+		args = append(args, "--nsFrom="+r.opts.NSFrom, "--nsTo="+r.opts.NSTo)
 	}
 
 	credentials, cleanup, err := credentialArgs(r.conn)

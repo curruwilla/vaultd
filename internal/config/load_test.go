@@ -270,6 +270,92 @@ verify_targets:
 	assert.Contains(t, render(diags), "refuses to create or drop databases without one")
 }
 
+// TestAssertionsAreCheckedAgainstTheTarget covers the assertion rules that
+// only make sense next to the target they run for (SPEC §8, decision D7).
+func TestAssertionsAreCheckedAgainstTheTarget(t *testing.T) {
+	stagingPG := `
+verify_targets:
+  - name: staging
+    engine: postgres
+    dsn: postgres://vaultd@staging:5432/postgres
+    database_prefix: vaultd_verify_
+`
+
+	tests := []struct {
+		name    string
+		yaml    string
+		want    string
+		isError bool
+	}{
+		{
+			name: "row_count without row counts",
+			yaml: withTarget("row_estimate: off\nverify:\n  level: restore\n  into: staging\n"+
+				"  assertions:\n    - type: row_count\n") + stagingPG,
+			want:    "sets row_estimate: off",
+			isError: true,
+		},
+		{
+			name: "exact row_count against estimates",
+			yaml: withTarget("verify:\n  level: restore\n  into: staging\n"+
+				"  assertions:\n    - type: row_count\n      tolerance: 0\n") + stagingPG,
+			want: "asserts an exact row count against estimated numbers",
+		},
+		{
+			name: "assertions at a level that never restores",
+			yaml: withTarget("verify:\n  level: structural\n" +
+				"  assertions:\n    - type: table_count\n"),
+			want: "they only run at level restore",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, diags := parse(t, tt.yaml)
+
+			assert.Equal(t, tt.isError, diags.HasErrors(), "diagnostics: %v", render(diags))
+			assert.Contains(t, render(diags), tt.want)
+		})
+	}
+}
+
+// TestQueryAssertionNeedsSQL: a query assertion is SQL, and MongoDB has none.
+// Saying so at validate time beats discovering it after the restore.
+func TestQueryAssertionNeedsSQL(t *testing.T) {
+	yaml := `
+version: 1
+destinations:
+  - name: r2
+    provider: r2
+    bucket: db-backups
+    endpoint: https://acc.r2.cloudflarestorage.com
+    access_key_id: key
+    secret_access_key: s3cret-value
+targets:
+  - name: prod-mongo
+    engine: mongodb
+    uri: mongodb://backup@mongo:27017/app
+    destination: r2
+    encryption: { mode: none }
+    verify:
+      level: restore
+      into: staging-mongo
+      assertions:
+        - type: query
+          sql: "select 1"
+          expect: 1
+verify_targets:
+  - name: staging-mongo
+    engine: mongodb
+    uri: mongodb://vaultd@staging:27017/admin
+    database_prefix: vaultd_verify_
+`
+
+	_, diags := parse(t, yaml)
+
+	require.True(t, diags.HasErrors())
+	assert.Contains(t, render(diags), "which is SQL")
+}
+
 func TestMarshalRedactsSecrets(t *testing.T) {
 	cfg, diags := parse(t, baseYAML)
 	require.False(t, diags.HasErrors())

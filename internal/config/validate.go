@@ -220,12 +220,17 @@ func (c *Config) validateTargetVerify(ds *Diagnostics, p string, t *Target) {
 		ds.warnf(p+".into", "target %q sets `into` but verifies at level %s, which never restores", t.Name, v.Level)
 	}
 
+	if len(v.Assertions) > 0 && v.Level != VerifyRestore {
+		ds.warnf(p+".assertions", "target %q declares assertions but verifies at level %s; they only run at level restore", t.Name, v.Level)
+	}
 	for j, a := range v.Assertions {
-		validateAssertion(ds, index(p+".assertions", j), t.Name, a)
+		validateAssertion(ds, index(p+".assertions", j), t, a)
 	}
 }
 
-func validateAssertion(ds *Diagnostics, p, target string, a Assertion) {
+func validateAssertion(ds *Diagnostics, p string, t *Target, a Assertion) {
+	target := t.Name
+
 	if !valid(a.Type, AssertionTypes) {
 		ds.errorf(p+".type", "target %q has assertion type %q; use one of %s", target, a.Type, oneOf(AssertionTypes))
 		return
@@ -236,6 +241,23 @@ func validateAssertion(ds *Diagnostics, p, target string, a Assertion) {
 		if a.Tolerance != nil && (*a.Tolerance < 0 || *a.Tolerance > 1) {
 			ds.errorf(p+".tolerance", "target %q has row_count tolerance %v; it is a fraction between 0 and 1", target, *a.Tolerance)
 		}
+		// The assertion compares the restored rows with the manifest's, and a
+		// target that records none has nothing to compare against.
+		if t.RowEstimate == RowEstimateOff {
+			ds.errorf(p, "target %q asserts on row counts but sets row_estimate: off, so its manifests record none; use estimate or exact", target)
+		}
+		// A table whose data is excluded restores empty on purpose, and the
+		// manifest still records the rows it had. Checking every table would
+		// report that arrangement as a broken backup.
+		if len(a.Tables) == 0 && len(t.Options.ExcludeTableData) > 0 {
+			ds.warnf(p+".tables", "target %q asserts row counts over every table but excludes the data of some (exclude_table_data), which restore empty; name the tables to check", target)
+		}
+		// An estimate is a sample. Demanding it match a real count exactly
+		// fails on a healthy backup as soon as the statistics age.
+		if a.Tolerance != nil && *a.Tolerance == 0 && t.RowEstimate == RowEstimateEstimate {
+			ds.warnf(p+".tolerance", "target %q asserts an exact row count against estimated numbers (row_estimate: estimate); set row_estimate: exact, or allow a tolerance", target)
+		}
+
 	case AssertQuery:
 		if strings.TrimSpace(a.SQL) == "" {
 			ds.errorf(p+".sql", "target %q has a query assertion with no sql", target)
@@ -243,10 +265,15 @@ func validateAssertion(ds *Diagnostics, p, target string, a Assertion) {
 		if a.Expect == nil {
 			ds.errorf(p+".expect", "target %q has a query assertion with no expect value", target)
 		}
+		if t.Engine == core.EngineMongoDB {
+			ds.errorf(p, "target %q (mongodb) has a query assertion, which is SQL; assert on row counts instead", target)
+		}
+
 	case AssertMaxAge:
 		if a.Value == nil || a.Value.Duration() <= 0 {
 			ds.errorf(p+".value", "target %q has a max_age assertion with no positive value (for example 26h)", target)
 		}
+
 	case AssertTableCount:
 		if len(a.Tables) > 0 {
 			ds.warnf(p+".tables", "target %q lists tables on a table_count assertion, which always counts them all", target)

@@ -59,6 +59,12 @@ type Runner struct {
 // and the caller has not insisted.
 var ErrDestinationNotEmpty = errors.New("the destination database is not empty")
 
+// ErrChecksumMismatch is returned when the restore applied but what reached
+// the database is not what was backed up. It is a sentinel because restore
+// verification has to tell it apart from a client that would not run at all:
+// one is a broken backup, the other is a broken environment.
+var ErrChecksumMismatch = errors.New("the restored stream does not match the manifest")
+
 // Run restores the backup a manifest describes.
 func (r *Runner) Run(ctx context.Context, m *manifest.Manifest, spec Spec) (Result, error) {
 	if spec.Timeout > 0 {
@@ -124,8 +130,8 @@ func (r *Runner) Run(ctx context.Context, m *manifest.Manifest, spec Spec) (Resu
 
 	if !result.Matched {
 		return result, fmt.Errorf(
-			"the restore applied, but what was written is not what was backed up: %d bytes with checksum %s, against %d and %s in the manifest",
-			result.Bytes, short(result.SHA256), m.Plaintext.Bytes, short(m.Plaintext.SHA256))
+			"%w: the restore applied, but what was written is not what was backed up: %d bytes with checksum %s, against %d and %s in the manifest",
+			ErrChecksumMismatch, result.Bytes, short(result.SHA256), m.Plaintext.Bytes, short(m.Plaintext.SHA256))
 	}
 
 	log.InfoContext(ctx, "restore finished", "bytes", result.Bytes, "duration_ms", result.Duration.Milliseconds())

@@ -14,6 +14,9 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.mongodb.org/mongo-driver/v2/bson"
+	"go.mongodb.org/mongo-driver/v2/mongo"
+	mongooptions "go.mongodb.org/mongo-driver/v2/mongo/options"
 
 	"github.com/curruwilla/vaultd/internal/core"
 	"github.com/curruwilla/vaultd/internal/manifest"
@@ -298,4 +301,245 @@ func countTables(t *testing.T, dsn string) int64 {
 	require.NoError(t, conn.QueryRow(ctx,
 		"select count(*) from information_schema.tables where table_schema = 'public'").Scan(&tables))
 	return tables
+}
+
+// restoreVerifyTemplate points prod-pg at a verify target on the same server:
+// vaultd creates a database of its own there, restores into it, asserts, and
+// drops it (SPEC §8, decision D3).
+//
+// The row_count assertion names its tables because exclude_table_data leaves
+// public.sessions with a schema and no rows, which is what the target asked
+// for and not something a restore can reproduce from the manifest's count.
+const restoreVerifyTemplate = `
+version: 1
+
+defaults:
+  compression: { algo: zstd, level: 1 }
+  encryption:  { mode: age, recipients: ["${E2E_AGE_RECIPIENT}"] }
+  retention:   { daily: { keep: 7 }, min_keep: 1 }
+  timeout: 5m
+  row_estimate: estimate
+
+destinations:
+  - name: bucket
+    provider: ${E2E_PROVIDER}
+    bucket: ${E2E_BUCKET}
+    endpoint: ${E2E_ENDPOINT}
+    region: ${E2E_REGION}
+    access_key_id: ${E2E_ACCESS_KEY_ID}
+    secret_access_key: ${E2E_SECRET_ACCESS_KEY}
+    prefix: ${E2E_PREFIX}
+
+targets:
+  - name: prod-pg
+    engine: postgres
+    dsn: ${E2E_PG_DSN}
+    destination: bucket
+    options:
+      exclude_table_data: ["public.sessions"]
+    verify:
+      level: restore
+      schedule: "0 5 * * 0"
+      into: staging-pg
+      assertions:
+        - type: table_count
+        - type: row_count
+          tables: ["public.users", "public.orders"]
+        - type: query
+          sql: "select count(*) from users where email is null"
+          expect: 0
+        - type: max_age
+          value: 26h
+
+  - name: prod-mongo
+    engine: mongodb
+    uri: ${E2E_MONGO_URI}
+    destination: bucket
+    verify:
+      level: restore
+      into: staging-mongo
+      assertions:
+        - type: table_count
+        - type: row_count
+
+verify_targets:
+  - name: staging-pg
+    engine: postgres
+    dsn: ${E2E_STAGING_DSN}
+    database_prefix: vaultd_verify_
+    max_concurrent: 1
+
+  - name: staging-mongo
+    engine: mongodb
+    uri: ${E2E_MONGO_URI}
+    database_prefix: vaultd_verify_
+    max_concurrent: 1
+`
+
+// setupRestoreVerify prepares a config with a verify target attached.
+func setupRestoreVerify(t *testing.T, bucket string) (configPath string, identity *age.X25519Identity) {
+	t.Helper()
+
+	configPath, identity = setupWith(t, bucket, restoreVerifyTemplate)
+	t.Setenv("E2E_STAGING_DSN", replaceDatabase(env.pgDSN, "postgres"))
+	return configPath, identity
+}
+
+// TestVerifyRestoreIntoStaging is the M5 acceptance criterion: the backup is
+// restored into an ephemeral database on the verify target, the assertions run
+// against real rows, and the database is gone afterwards.
+func TestVerifyRestoreIntoStaging(t *testing.T) {
+	configPath, identity := setupRestoreVerify(t, "vaultd-e2e-verify-restore")
+
+	_, stderr, err := run(t, "backup", "prod-pg", "-c", configPath)
+	require.NoError(t, err, "stderr: %s", stderr)
+
+	stdout, stderr, err := run(t, "verify", "--target", "prod-pg", "--latest", "--level", "restore",
+		"--identity-file", identityFile(t, identity), "-c", configPath)
+	require.NoError(t, err, "stderr: %s", stderr)
+
+	assert.Contains(t, stdout, "passed restore verification")
+	assert.Regexp(t, `restored into\s+vaultd_verify_`, stdout)
+	// The row counts are the point of the milestone: they were read out of a
+	// database that only exists because the backup restored into it.
+	assert.Contains(t, stdout, "public.users: 2000 rows")
+	assert.Contains(t, stdout, "public.orders: 5000 rows")
+	assert.Contains(t, stdout, "3 tables, as the manifest records")
+	assert.Contains(t, stdout, "returned 0, as expected")
+
+	// The outcome lands on the manifest and in the index, which is what stops
+	// prune from deleting the most recent verified backup.
+	store := newStore(t, "vaultd-e2e-verify-restore")
+	entry := latestBackup(t, store, "e2e/_index/prod-pg.jsonl")
+	require.True(t, entry.Verified())
+	assert.Equal(t, "restore", entry.VerifyLevel)
+
+	m := fetchManifest(t, store, entry.ManifestKey)
+	require.NotNil(t, m.Verify)
+	assert.True(t, m.Verify.OK)
+	assert.Contains(t, m.Verify.Details, "assertions")
+
+	// And nothing is left on the staging server.
+	assert.Empty(t, verifyDatabases(t), "the ephemeral database must be dropped")
+}
+
+// TestVerifyRestoreReportsABrokenBackup: a corrupted object cannot restore,
+// and that is a finding about the backup — reported, recorded, non-zero exit —
+// rather than an error from the tool.
+func TestVerifyRestoreReportsABrokenBackup(t *testing.T) {
+	configPath, identity := setupRestoreVerify(t, "vaultd-e2e-verify-restore-broken")
+
+	_, stderr, err := run(t, "backup", "prod-pg", "-c", configPath)
+	require.NoError(t, err, "stderr: %s", stderr)
+
+	store := newStore(t, "vaultd-e2e-verify-restore-broken")
+	entry := latestBackup(t, store, "e2e/_index/prod-pg.jsonl")
+
+	object := bytes.Clone(download(t, store, entry.Key))
+	require.Greater(t, len(object), 1000)
+	object[len(object)/2] ^= 0x40
+	_, err = store.Put(t.Context(), entry.Key, bytes.NewReader(object), core.PutOptions{})
+	require.NoError(t, err)
+
+	_, stderr, err = run(t, "verify", "--target", "prod-pg", "--latest", "--level", "restore",
+		"--identity-file", identityFile(t, identity), "-c", configPath)
+
+	require.Error(t, err, "a corrupted backup must fail restore verification")
+	assert.Contains(t, stderr, "failed restore verification")
+	assert.Contains(t, stderr, "did not restore")
+
+	entry = latestBackup(t, store, "e2e/_index/prod-pg.jsonl")
+	require.NotNil(t, entry.VerifyOK)
+	assert.False(t, *entry.VerifyOK)
+
+	// Even a failed check cleans up after itself.
+	assert.Empty(t, verifyDatabases(t), "a failed verification must not leave a database behind")
+}
+
+// TestVerifyCollectsLeftoverDatabases covers the second line of defence: what
+// a run that crashed between creating a database and dropping it leaves.
+func TestVerifyCollectsLeftoverDatabases(t *testing.T) {
+	configPath, _ := setupRestoreVerify(t, "vaultd-e2e-verify-gc")
+
+	leftover := "vaultd_verify_01crashedrun"
+	createDatabase(t, leftover)
+	require.Contains(t, verifyDatabases(t), leftover)
+
+	stdout, stderr, err := run(t, "verify", "--gc", "--target", "prod-pg", "-c", configPath)
+	require.NoError(t, err, "stderr: %s", stderr)
+
+	assert.Contains(t, stdout, "dropped "+leftover)
+	assert.Empty(t, verifyDatabases(t))
+}
+
+// TestVerifyRestoreMongo covers the other shape of restore verification: a
+// MongoDB archive carries the database it came from, so restoring it into an
+// ephemeral one is a namespace rename rather than a destination.
+func TestVerifyRestoreMongo(t *testing.T) {
+	if !env.mongoClientOK {
+		t.Skip("no mongodump on this host; install mongodb-database-tools or run `make dev-clients`")
+	}
+
+	configPath, identity := setupRestoreVerify(t, "vaultd-e2e-verify-restore-mongo")
+
+	_, stderr, err := run(t, "backup", "prod-mongo", "-c", configPath)
+	require.NoError(t, err, "stderr: %s", stderr)
+
+	stdout, stderr, err := run(t, "verify", "--target", "prod-mongo", "--latest", "--level", "restore",
+		"--identity-file", identityFile(t, identity), "-c", configPath)
+	require.NoError(t, err, "stderr: %s", stderr)
+
+	assert.Contains(t, stdout, "passed restore verification")
+	assert.Contains(t, stdout, "app.users: 200 rows")
+
+	store := newStore(t, "vaultd-e2e-verify-restore-mongo")
+	entry := latestBackup(t, store, "e2e/_index/prod-mongo.jsonl")
+	require.True(t, entry.Verified())
+	assert.Equal(t, "restore", entry.VerifyLevel)
+
+	assert.Empty(t, mongoVerifyDatabases(t), "the ephemeral database must be dropped")
+}
+
+// mongoVerifyDatabases lists what vaultd has created on the MongoDB verify
+// target.
+func mongoVerifyDatabases(t *testing.T) []string {
+	t.Helper()
+
+	client, err := mongo.Connect(mongooptions.Client().ApplyURI(env.mongoURI))
+	require.NoError(t, err)
+	defer func() { _ = client.Disconnect(t.Context()) }()
+
+	names, err := client.ListDatabaseNames(t.Context(), bson.D{})
+	require.NoError(t, err)
+
+	var out []string
+	for _, name := range names {
+		if strings.HasPrefix(name, "vaultd_verify_") {
+			out = append(out, name)
+		}
+	}
+	return out
+}
+
+// verifyDatabases lists what vaultd has created on the verify target.
+func verifyDatabases(t *testing.T) []string {
+	t.Helper()
+
+	ctx := context.Background()
+	conn, err := pgx.Connect(ctx, env.pgDSN)
+	require.NoError(t, err)
+	defer conn.Close(ctx)
+
+	rows, err := conn.Query(ctx, "select datname from pg_database where starts_with(datname, 'vaultd_verify_') order by 1")
+	require.NoError(t, err)
+	defer rows.Close()
+
+	var names []string
+	for rows.Next() {
+		var name string
+		require.NoError(t, rows.Scan(&name))
+		names = append(names, name)
+	}
+	require.NoError(t, rows.Err())
+	return names
 }

@@ -155,3 +155,71 @@ type Store interface {
 // distinguish "this backup is gone" from "the bucket is unreachable" with
 // errors.Is, never by matching provider-specific error text.
 var ErrNotFound = errors.New("object not found")
+
+// Inspector reads a database back once something has been restored into it.
+//
+// The names it takes are the ones the manifest records, and those are
+// engine-specific — `public.users` for PostgreSQL, `users` for MySQL,
+// `app.users` for MongoDB. Each adapter maps them onto whatever it actually
+// created, so the caller compares manifests with restores without knowing
+// which engine it is holding.
+type Inspector interface {
+	// Tables lists what the restored database holds, in its own naming.
+	Tables(ctx context.Context) ([]string, error)
+	// CountRows counts one table exactly. A freshly restored database has no
+	// statistics worth reading, so an estimate here would measure nothing.
+	CountRows(ctx context.Context, table string) (int64, error)
+	// Scalar runs a query and returns its single value.
+	Scalar(ctx context.Context, query string) (any, error)
+}
+
+// Sandbox is a database created for one restore verification and dropped
+// afterwards (SPEC §8, decision D3). It is what L2 restores into, and what the
+// assertions then read.
+type Sandbox interface {
+	Restorer
+	Inspector
+	// Name is the database that was created. It always carries the verify
+	// target's configured prefix.
+	Name() string
+	// Drop removes it, whatever it ended up holding. It is idempotent: the
+	// verification defers it, and `verify --gc` may have collected it first.
+	Drop(ctx context.Context) error
+}
+
+// SandboxSpec is the sandbox a verification asks for.
+type SandboxSpec struct {
+	// Name is the database to create.
+	Name string
+	// Tables are the manifest's table names. An engine that has to remap
+	// namespaces while restoring — MongoDB, whose archive carries the database
+	// it came from — reads the source out of them; the SQL engines ignore
+	// them.
+	Tables []TableInfo
+}
+
+// Provisioner hands out sandboxes on a verify target and takes them back. It
+// is the seam the roadmap's Docker and Kubernetes runners implement without
+// anything above them changing (SPEC §8).
+type Provisioner interface {
+	// Probe reports what the staging server is, which is what decides whether
+	// it can restore this backup at all.
+	Probe(ctx context.Context) (ServerInfo, error)
+	// Create makes an empty database and returns it. The name must carry the
+	// configured prefix; a Provisioner refuses anything else.
+	Create(ctx context.Context, spec SandboxSpec) (Sandbox, error)
+	// List names the sandbox databases that exist on the server right now,
+	// which is what `verify --gc` collects after a crashed run.
+	List(ctx context.Context) ([]string, error)
+	// Drop removes one by name, refusing a name outside the prefix.
+	Drop(ctx context.Context, name string) error
+}
+
+// ErrSandboxUnsupported is returned by a Provisioner that cannot give a
+// particular backup an ephemeral database of its own. Verification reports it
+// as skipped rather than failed: the backup is not what is wrong.
+var ErrSandboxUnsupported = errors.New("this backup cannot be restored into an ephemeral database")
+
+// ErrQueryUnsupported is returned by an Inspector for an engine with no query
+// language to run a `query` assertion against.
+var ErrQueryUnsupported = errors.New("this engine has no queries to assert on")

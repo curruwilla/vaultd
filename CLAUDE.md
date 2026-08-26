@@ -14,8 +14,10 @@ handling, concurrency, CLI, security, lint).
 
 Hexagonal, ports and adapters:
 
-- `internal/core/` holds the ports — `Dumper`, `Restorer`, `Store` — plus the
-  value types they exchange. It imports nothing from the rest of the project.
+- `internal/core/` holds the ports — `Dumper`, `Restorer`, `Store`, and
+  `Provisioner`/`Sandbox`/`Inspector` for the ephemeral databases restore
+  verification uses — plus the value types they exchange. It imports nothing
+  from the rest of the project.
 - Adapters implement a port and live beside it: `internal/engine/{postgres,
   mysql,mongodb}`, `internal/storage/s3`, `internal/notify/`.
 - Pipeline, retention and verify logic stays pure and testable without a
@@ -122,6 +124,24 @@ probe is not a formality: it decides the command line.
 - **The restored stream is checksummed on the way past.** A client that exits 0
   having consumed half the archive leaves a database holding half a backup;
   comparing against the manifest is what catches it.
+- **L2 restores into a database of its own, and drops it.** The name is the
+  verify target's `database_prefix` plus the backup id, the drop is deferred on
+  a context that survives cancellation, and `verify --gc` collects what a
+  crashed process could not. A `Provisioner` refuses every name outside the
+  prefix, which is what stands between a verification and a staging database
+  somebody cares about.
+- **A skip is not a failure, and is not recorded.** A staging server older than
+  the source, or a topology that cannot be renamed into one ephemeral database,
+  comes back as `Result.Skipped` with a reason. Writing it down would replace
+  the verification a backup already earned with the absence of one; exiting
+  non-zero would break a nightly run over something the backup did not do.
+- **An estimate is compared as an estimate.** Manifest row counts are the
+  planner's by default (D7), so a `row_count` assertion with no `tolerance`
+  compares within `estimateTolerance` and says so in its detail. An explicit
+  `tolerance: 0` means exact, because the operator asked; `validate` warns when
+  that meets `row_estimate: estimate`.
+- **Assertions collect, they do not stop** — the same rule as `config.Validate`,
+  and each check records what it compared, not merely that it failed.
 
 ## Conventions
 
@@ -153,5 +173,5 @@ probe is not a formality: it decides the command line.
 ```bash
 make fmt lint test
 make validate-example    # the M0 acceptance gate
-make test-integration    # the M1 acceptance gate (needs Docker and a pg_dump)
+make test-integration    # the M1–M5 acceptance gates (needs Docker and the clients)
 ```

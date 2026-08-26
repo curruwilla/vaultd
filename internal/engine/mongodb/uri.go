@@ -57,3 +57,34 @@ func (c connInfo) redact(s string) string {
 	}
 	return credentialsRE.ReplaceAllString(s, "${1}***:***@")
 }
+
+// withDatabase returns the same URI pointed at another database, or at none
+// when name is empty.
+//
+// The authentication database travels with it: MongoDB defaults authSource to
+// whatever the URI's path names, so moving the path without saying so would
+// authenticate against a database that does not exist.
+func (c connInfo) withDatabase(name string) (connInfo, error) {
+	u, err := url.Parse(c.Raw)
+	if err != nil {
+		return connInfo{}, errors.New("the URI is not valid MongoDB syntax")
+	}
+
+	if u.User != nil {
+		query := u.Query()
+		if query.Get("authSource") == "" {
+			source := c.Database
+			if source == "" {
+				source = "admin"
+			}
+			query.Set("authSource", source)
+			u.RawQuery = query.Encode()
+		}
+	}
+	u.Path = "/" + name
+
+	updated := c
+	updated.Raw = u.String()
+	updated.Database = name
+	return updated, nil
+}

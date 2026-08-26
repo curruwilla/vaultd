@@ -229,7 +229,17 @@ func (a *App) Retention(target *config.Target) retention.Policy {
 // Verifier assembles the verifier of a target. The age identities come from
 // the invocation rather than the config: the private key is deliberately not
 // something vaultd stores (SPEC §15).
-func (a *App) Verifier(ctx context.Context, target *config.Target, identities []age.Identity) (*verify.Verifier, error) {
+//
+// The level is part of the request because restore verification needs a
+// staging server to restore into, and building one for a check that will never
+// touch it would fail a `--level integrity` run over a verify target that
+// happens to be misconfigured.
+func (a *App) Verifier(
+	ctx context.Context,
+	target *config.Target,
+	identities []age.Identity,
+	level verify.Level,
+) (*verify.Verifier, error) {
 	store, err := a.Store(ctx, target.Destination)
 	if err != nil {
 		return nil, err
@@ -249,7 +259,98 @@ func (a *App) Verifier(ctx context.Context, target *config.Target, identities []
 	if target.Encryption != nil {
 		verifier.Passphrase = target.Encryption.Passphrase.Reveal()
 	}
+
+	if level == verify.LevelRestore {
+		if err := a.attachSandbox(verifier, target); err != nil {
+			return nil, err
+		}
+	}
 	return verifier, nil
+}
+
+// attachSandbox gives a verifier the staging server it restores into, and the
+// assertions it runs once the backup is there (decision D3).
+func (a *App) attachSandbox(verifier *verify.Verifier, target *config.Target) error {
+	if target.Verify == nil || target.Verify.Into == "" {
+		return fmt.Errorf(
+			"target %q does not say where to restore for verification; set verify.into to a declared verify target",
+			target.Name)
+	}
+
+	into, ok := a.cfg.VerifyTarget(target.Verify.Into)
+	if !ok {
+		return fmt.Errorf("target %q restores into verify target %q, which is not declared", target.Name, target.Verify.Into)
+	}
+	if into.Engine != target.Engine {
+		return fmt.Errorf("target %q (%s) restores into verify target %q (%s); engines must match",
+			target.Name, target.Engine, into.Name, into.Engine)
+	}
+
+	provisioner, err := a.Provisioner(into)
+	if err != nil {
+		return err
+	}
+
+	verifier.Sandbox = provisioner
+	verifier.DatabasePrefix = into.DatabasePrefix
+	verifier.Assertions = assertionsOf(target.Verify.Assertions)
+	if target.Timeout != nil {
+		verifier.RestoreTimeout = target.Timeout.Duration()
+	}
+	return nil
+}
+
+// Provisioner builds the adapter that creates and drops ephemeral databases on
+// a verify target. It is the engine registry again, for the other direction.
+func (a *App) Provisioner(into *config.VerifyTarget) (core.Provisioner, error) {
+	switch into.Engine {
+	case core.EnginePostgres:
+		return postgres.NewProvisioner(postgres.ProvisionOptions{
+			DSN:    into.Conn().Reveal(),
+			Prefix: into.DatabasePrefix,
+		})
+
+	case core.EngineMySQL, core.EngineMariaDB:
+		return mysql.NewProvisioner(mysql.ProvisionOptions{
+			DSN:    into.Conn().Reveal(),
+			Flavor: flavorOf(into.Engine),
+			Prefix: into.DatabasePrefix,
+		})
+
+	case core.EngineMongoDB:
+		return mongodb.NewProvisioner(mongodb.ProvisionOptions{
+			URI:    into.Conn().Reveal(),
+			Prefix: into.DatabasePrefix,
+		})
+
+	default:
+		return nil, fmt.Errorf("verify target %q uses unknown engine %q", into.Name, into.Engine)
+	}
+}
+
+// assertionsOf translates the configured assertions into what the verifier
+// runs. The duration of a max_age assertion is the only field that changes
+// shape on the way.
+func assertionsOf(declared []config.Assertion) []verify.Assertion {
+	if len(declared) == 0 {
+		return nil
+	}
+
+	out := make([]verify.Assertion, 0, len(declared))
+	for _, a := range declared {
+		assertion := verify.Assertion{
+			Type:      verify.AssertionType(a.Type),
+			Tables:    a.Tables,
+			Tolerance: a.Tolerance,
+			SQL:       a.SQL,
+			Expect:    a.Expect,
+		}
+		if a.Value != nil {
+			assertion.MaxAge = a.Value.Duration()
+		}
+		out = append(out, assertion)
+	}
+	return out
 }
 
 // Runner assembles the backup runner of a target.

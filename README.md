@@ -4,15 +4,16 @@ Database backups to S3-compatible storage. One Go binary, one declarative config
 streaming dumps of MySQL/MariaDB, PostgreSQL and MongoDB, zstd compression, age
 encryption, GFS retention and real restore verification.
 
-**Status: M4.** All four engines back up end to end — PostgreSQL, MySQL,
+**Status: M5.** All four engines back up end to end — PostgreSQL, MySQL,
 MariaDB and MongoDB — old backups expire on a GFS retention policy, and a
-stored backup can be checked and restored. `vaultd backup` streams a dump
-through compression and age encryption into an S3-compatible bucket and writes
-a manifest beside it; `vaultd list` reads the index back; `vaultd prune`
-applies the policy; `vaultd verify` proves a backup still reads back; `vaultd
-restore` writes one into a database. Restore verification against a staging
-server and the daemon follow. Commands that are not implemented yet are
-registered, document their flags, and fail with the milestone that brings them.
+stored backup can be checked, restored, and proven to restore. `vaultd backup`
+streams a dump through compression and age encryption into an S3-compatible
+bucket and writes a manifest beside it; `vaultd list` reads the index back;
+`vaultd prune` applies the policy; `vaultd verify` proves a backup still reads
+back — and, at level `restore`, that it comes back into a real server with the
+rows it claims; `vaultd restore` writes one into a database. Notifiers, metrics
+and the daemon follow. Commands that are not implemented yet are registered,
+document their flags, and fail with the milestone that brings them.
 
 | Engine | Client it drives | Consistency it achieves |
 | --- | --- | --- |
@@ -135,12 +136,13 @@ a second source of truth: it records every run, successful or failed, and
 ## Verification and restore
 
 A backup nobody has read back is a hypothesis. `vaultd verify` turns it into a
-fact, at two costs:
+fact, at three costs:
 
 | Level | What it does | Cost |
 | --- | --- | --- |
 | `integrity` | one HEAD per object: it is there, and it is the size the manifest records | no egress, safe to run after every backup |
 | `structural` | reads the object back in full, decrypts it, decompresses it, checks the plaintext checksum against the manifest and the format against the engine | egress and CPU, worth a daily schedule |
+| `restore` | restores the backup into a database of its own on a staging server, runs the configured assertions against it, and drops it | egress, CPU and a server, worth a weekly schedule |
 
 ```console
 $ vaultd verify --target prod-pg --latest --level structural --identity-file key.age
@@ -155,6 +157,69 @@ A flipped byte fails it — age authenticates what it decrypts, so corruption
 surfaces before a checksum comparison is even reached. The outcome is written
 onto the manifest and into the index, which is what stops `prune` from deleting
 the most recent verified backup.
+
+### Restore verification
+
+`--level restore` is the only check that proves a backup comes back rather than
+that its bytes are intact. It needs a `verify_targets` entry: a staging server
+whose credential may create databases inside one prefix, and nothing else.
+
+```yaml
+targets:
+  - name: prod-pg
+    # …
+    verify:
+      level: restore
+      schedule: "0 5 * * 0"
+      into: staging-pg
+      assertions:
+        - type: table_count               # as many tables as the manifest records
+        - type: row_count                 # each table's rows, against the manifest
+          tables: ["public.users", "public.orders"]
+        - type: query                     # your own SQL, against the restored data
+          sql: "select count(*) from users where email is null"
+          expect: 0
+        - type: max_age                   # the backup is newer than this
+          value: 26h
+
+verify_targets:
+  - name: staging-pg
+    engine: postgres
+    dsn: ${STAGING_PG_ADMIN_DSN}          # needs CREATEDB and nothing beyond it
+    database_prefix: vaultd_verify_       # the only names vaultd creates or drops
+    max_concurrent: 1
+```
+
+```console
+$ vaultd verify --target prod-pg --latest --level restore --identity-file key.age
+ok: prod-pg passed restore verification
+  backup         01JMX… (2026-08-24 03:00Z)
+  level          restore in 4m12s
+  restored into  vaultd_verify_01jmx…
+  read back      19.4 GB
+  assertions
+    ok  table_count  38 tables, as the manifest records
+    ok  row_count    public.users: 1928372 rows against 1928372 in the manifest (estimated, within 20%)
+    ok  query        select count(*) from users where email is null returned 0, as expected
+    ok  max_age      the backup is 2h14m0s old, within 26h0m0s
+```
+
+- The database is named after the backup and dropped afterwards, whatever the
+  outcome. `vaultd verify --gc` collects what a crashed run left behind.
+- Row counts in a manifest are estimates by default (`row_estimate: estimate`),
+  so a `row_count` assertion compares within a band rather than demanding
+  equality — an exact comparison would measure the age of the server's
+  statistics. Set `row_estimate: exact`, or give the assertion a `tolerance`,
+  to decide that yourself.
+- A backup that will not restore is a **finding**, not an error: it is reported,
+  recorded on the manifest and in the index, and the command exits non-zero.
+- A staging server older than the source is a **skip**, with the reason: the
+  backup is not what is wrong, so nothing is recorded and a good verification
+  from last week survives.
+- MongoDB archives carry the database they came from, so a restore into an
+  ephemeral one is a namespace rename; a backup holding several databases is
+  skipped with that reason rather than restored over the staging server's own
+  names.
 
 Reading a backup back needs the age private key, and vaultd never stores it:
 it lives away from the machine that takes the backups (a compromised backup
@@ -200,7 +265,7 @@ Opting out is legal, but it is a line in the YAML that a reviewer can see.
 | `vaultd list [target]` | ready |
 | `vaultd prune <target>` | ready — dry run unless `--apply` |
 | `vaultd reindex <target>` | ready |
-| `vaultd verify [id]` | ready — integrity and structural |
+| `vaultd verify [id]` | ready — integrity, structural and restore (`--gc` collects leftovers) |
 | `vaultd restore <id> --to <dsn>` | ready |
 | `vaultd doctor` | M6 |
 | `vaultd serve`, `vaultd run` | M7 |
@@ -246,18 +311,18 @@ analyze a Go 1.27 standard library yet.
 
 ```
 cmd/vaultd/          entry point, nothing but wiring
-internal/core/       ports: Dumper, Restorer, Store — the interfaces everything is written against
+internal/core/       ports: Dumper, Restorer, Store, Provisioner — the interfaces everything is written against
 internal/config/     parse, interpolate, merge defaults, validate, redact
 internal/pipeline/   compress → encrypt → hash, over io.Pipe
 internal/engine/     client resolution and stderr capture
-  postgres/          pg_dump, pg_dumpall and the catalog probe
+  postgres/          pg_dump, pg_dumpall, the catalog probe and the verify sandbox
   mysql/             mysqldump and mariadb-dump, and the flags each server accepts
   mongodb/           mongodump, replica-set detection, credentials over a pipe
 internal/storage/    s3/ (AWS, R2, MinIO) and memory/ for tests
 internal/manifest/   manifest schema, object key layout, index entries
 internal/index/      the listing cache: conditional append, rebuild
 internal/retention/  GFS classification and the invariants prune obeys
-internal/verify/     L0/L1 checks and the per-engine format validators
+internal/verify/     L0/L1/L2 checks, the format validators and the assertions
 internal/restore/    streaming a stored backup back into a database
 internal/backup/     the orchestration: probe → stream → manifest
 internal/app/        config to adapters, the wiring layer

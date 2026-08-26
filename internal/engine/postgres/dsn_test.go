@@ -53,3 +53,40 @@ func TestWithDatabase(t *testing.T) {
 	assert.Equal(t, "postgres", maintenance.Database)
 	assert.Equal(t, "app", info.Database, "withDatabase must not mutate the original")
 }
+
+// TestWithDatabaseDSN: a verify sandbox is a second database on the same
+// server, and pointing at it must not lose the TLS settings or mangle a
+// password that a URL would have to percent-encode.
+func TestWithDatabaseDSN(t *testing.T) {
+	info, err := parseDSN("postgres://vaultd:p%40ss%2Fword@staging:5432/postgres?sslmode=require&connect_timeout=5")
+	require.NoError(t, err)
+
+	dsn := info.withDatabaseDSN("vaultd_verify_01j")
+
+	// It parses back into the same connection, pointed one database over.
+	sandbox, err := parseDSN(dsn)
+	require.NoError(t, err)
+	assert.Equal(t, "staging", sandbox.Host)
+	assert.Equal(t, uint16(5432), sandbox.Port)
+	assert.Equal(t, "vaultd", sandbox.User)
+	assert.Equal(t, "p@ss/word", sandbox.Password)
+	assert.Equal(t, "vaultd_verify_01j", sandbox.Database)
+	assert.Equal(t, "require", sandbox.env()["PGSSLMODE"])
+	assert.Equal(t, "5", sandbox.env()["PGCONNECT_TIMEOUT"])
+
+	assert.Equal(t, "postgres", info.Database, "withDatabaseDSN must not mutate the original")
+}
+
+// TestWithDatabaseDSNQuotesAwkwardValues: libpq reads a quote and a backslash
+// as syntax, so a password holding either has to be escaped on the way out.
+func TestWithDatabaseDSNQuotesAwkwardValues(t *testing.T) {
+	info, err := parseDSN(`postgres://vaultd:a%27b%5Cc%20d@staging:5432/postgres`)
+	require.NoError(t, err)
+	require.Equal(t, `a'b\c d`, info.Password)
+
+	sandbox, err := parseDSN(info.withDatabaseDSN("vaultd_verify_01j"))
+	require.NoError(t, err)
+
+	assert.Equal(t, `a'b\c d`, sandbox.Password)
+	assert.Equal(t, "vaultd_verify_01j", sandbox.Database)
+}

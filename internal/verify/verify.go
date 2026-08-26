@@ -1,11 +1,13 @@
 // Package verify checks that a stored backup is still what its manifest says
 // it is (SPEC §8).
 //
-// Two levels live here. L0 asks the bucket what it holds — cheap enough to run
-// after every backup. L1 reads the object back in full, decrypts it,
+// Three levels live here. L0 asks the bucket what it holds — cheap enough to
+// run after every backup. L1 reads the object back in full, decrypts it,
 // decompresses it and compares the plaintext checksum with the manifest, which
-// is the check that actually catches a corrupted or truncated backup. L2, the
-// restore into a live server, arrives with the verify targets in M5.
+// is the check that actually catches a corrupted or truncated backup. L2
+// restores the backup into a database of its own on a staging server and runs
+// the configured assertions against it, which is the only check that proves a
+// backup comes back rather than that its bytes are intact (restore.go).
 package verify
 
 import (
@@ -34,7 +36,8 @@ const (
 	// LevelStructural reads the whole object back and checks it against the
 	// manifest, byte for byte.
 	LevelStructural Level = "structural"
-	// LevelRestore restores into a live server. It arrives in M5.
+	// LevelRestore restores into an ephemeral database on the verify target
+	// and asserts against what came back.
 	LevelRestore Level = "restore"
 )
 
@@ -50,6 +53,13 @@ type Result struct {
 	// the verification could not run at all.
 	Problems []string       `json:"problems,omitempty"`
 	Details  map[string]any `json:"details,omitempty"`
+	// Skipped says the check could not be attempted for a reason that is not
+	// the backup's fault — a staging server older than the source, a topology
+	// that cannot be restored into an ephemeral database. It is neither a pass
+	// nor a failure: nothing is recorded, so a backup verified last week keeps
+	// the verification it earned (SPEC §8).
+	Skipped bool   `json:"skipped,omitempty"`
+	Reason  string `json:"reason,omitempty"`
 	// Duration is how long the check took, which is what makes L1 worth
 	// scheduling rather than running everywhere.
 	Duration time.Duration `json:"-"`
@@ -57,6 +67,9 @@ type Result struct {
 
 // Summary renders the result as one line.
 func (r Result) Summary(target string) string {
+	if r.Skipped {
+		return fmt.Sprintf("skipped: %s was not verified: %s", target, r.Reason)
+	}
 	if r.OK {
 		return fmt.Sprintf("ok: %s passed %s verification", target, r.Level)
 	}
@@ -77,8 +90,20 @@ type Verifier struct {
 	// Passphrase decrypts a backup taken in passphrase mode; that one does
 	// live in the config, so it comes from there.
 	Passphrase string
-	Now        func() time.Time
-	Log        *slog.Logger
+	// Sandbox provisions the ephemeral databases restore verification writes
+	// into. It is nil unless the target declares a verify target, which is why
+	// `--level restore` then refuses rather than restoring somewhere nobody
+	// asked for.
+	Sandbox core.Provisioner
+	// DatabasePrefix names those databases. It is the verify target's own
+	// prefix, and the only namespace vaultd will create or drop in.
+	DatabasePrefix string
+	// Assertions are the checks run against a restored backup.
+	Assertions []Assertion
+	// RestoreTimeout bounds one L2 restore; zero means the context decides.
+	RestoreTimeout time.Duration
+	Now            func() time.Time
+	Log            *slog.Logger
 }
 
 // Backup verifies one indexed backup at the given level and records the
@@ -96,6 +121,12 @@ func (v *Verifier) Backup(ctx context.Context, entry manifest.Entry, level Level
 	result, err := v.Manifest(ctx, m, level)
 	if err != nil {
 		return Result{}, err
+	}
+
+	if result.Skipped {
+		// Nothing ran, so nothing is recorded: writing this down would replace
+		// the verification the backup already has with the absence of one.
+		return result, nil
 	}
 
 	if err := v.record(ctx, m, entry.ManifestKey, result); err != nil {
@@ -121,9 +152,9 @@ func (v *Verifier) Manifest(ctx context.Context, m *manifest.Manifest, level Lev
 	case LevelStructural:
 		result, err = v.structural(ctx, m)
 	case LevelRestore:
-		return Result{}, errors.New("restore verification arrives in milestone M5; use --level structural")
+		result, err = v.restore(ctx, m)
 	default:
-		return Result{}, fmt.Errorf("unknown verify level %q; use one of integrity, structural", level)
+		return Result{}, fmt.Errorf("unknown verify level %q; use one of integrity, structural, restore", level)
 	}
 	if err != nil {
 		return Result{}, err
@@ -324,6 +355,13 @@ func (v *Verifier) record(ctx context.Context, m *manifest.Manifest, manifestKey
 		return nil
 	}
 	return v.Index.SetVerification(ctx, m.ID, string(result.Level), result.OK, result.At)
+}
+
+func (v *Verifier) log() *slog.Logger {
+	if v.Log == nil {
+		return slog.Default()
+	}
+	return v.Log
 }
 
 func (v *Verifier) now() time.Time {
