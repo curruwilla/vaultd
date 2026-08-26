@@ -1,4 +1,4 @@
-package cli
+package prune_test
 
 import (
 	"testing"
@@ -8,6 +8,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/curruwilla/vaultd/internal/manifest"
+	"github.com/curruwilla/vaultd/internal/prune"
 )
 
 var pruneAt = time.Date(2026, 8, 24, 3, 0, 0, 0, time.UTC)
@@ -28,14 +29,14 @@ func failed(when time.Time) manifest.Entry {
 	return manifest.NewFailureEntry("prod-pg", when, when, "dump", "pg_dump exited with code 1")
 }
 
-func TestBackupsOfSkipsFailures(t *testing.T) {
+func TestBackupsSkipsFailures(t *testing.T) {
 	entries := []manifest.Entry{
 		succeeded("01A", pruneAt),
 		failed(pruneAt.Add(time.Hour)),
 		succeeded("01B", pruneAt.Add(2*time.Hour)),
 	}
 
-	backups := backupsOf(entries)
+	backups := prune.Backups(entries)
 
 	require.Len(t, backups, 2)
 	assert.Equal(t, "01A", backups[0].ID)
@@ -44,12 +45,12 @@ func TestBackupsOfSkipsFailures(t *testing.T) {
 	assert.Equal(t, []string{"01A.pgdump.zst.age", "01A.manifest.json"}, backups[0].Keys)
 }
 
-func TestBackupsOfCarriesVerification(t *testing.T) {
+func TestBackupsCarryVerification(t *testing.T) {
 	verified := succeeded("01A", pruneAt)
 	ok := true
 	verified.VerifyOK = &ok
 
-	backups := backupsOf([]manifest.Entry{verified})
+	backups := prune.Backups([]manifest.Entry{verified})
 
 	require.Len(t, backups, 1)
 	assert.True(t, backups[0].Verified)
@@ -83,7 +84,7 @@ func TestLastRunFailed(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.want, lastRunFailed(tt.entries))
+			assert.Equal(t, tt.want, prune.LastRunFailed(tt.entries))
 		})
 	}
 }

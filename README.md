@@ -268,7 +268,51 @@ Opting out is legal, but it is a line in the YAML that a reviewer can see.
 | `vaultd verify [id]` | ready — integrity, structural and restore (`--gc` collects leftovers) |
 | `vaultd restore <id> --to <dsn>` | ready |
 | `vaultd doctor [target...]` | ready — clients, databases, bucket, notifiers |
-| `vaultd serve`, `vaultd run` | M7 |
+| `vaultd serve` | ready — scheduler, locks, metrics, API |
+| `vaultd run` | ready — one-shot for a CronJob or a timer |
+
+## Running it as a daemon
+
+`vaultd serve` is the supported way to run vaultd (decision D4). It evaluates
+every target's schedule, takes that target's lock before running it, applies
+the retention policy after a successful backup, and serves the HTTP endpoints.
+
+```bash
+vaultd serve                       # scheduler + metrics + API
+vaultd run                         # one-shot: everything due, then exit
+vaultd run --dry-run               # what is due, without running it
+```
+
+**The daemon keeps no state of its own.** What is due is derived from the cron
+expression in the config and from when the target last ran, which the index in
+the bucket records. A daemon that has just started, one that has been up for a
+month, and a Kubernetes CronJob calling `vaultd run` all compute the same
+answer — so a restart neither loses a schedule nor repeats one.
+
+**Two replicas cannot run the same target at once.** Each takes a lease on
+`_locks/<target>.lock` with a conditional create, renews it with a heartbeat,
+and gives it up when the run ends; a holder that dies loses the lease when it
+expires rather than blocking the target forever. The lock is shared with the
+one-shot commands, so a manual `vaultd backup` and the daemon never collide.
+The lock alone is not quite enough — a replica with a stale view would take the
+lock the instant the other released it — so the due check runs again against
+the index once the lock is held.
+
+| Endpoint | Auth | What it is for |
+| --- | --- | --- |
+| `/healthz` | open | liveness — the process is up. Never depends on the bucket |
+| `/readyz` | open | readiness — the config is valid and the destinations answer |
+| `/metrics` | token | Prometheus |
+| `/api/…` | token | the read-only API the UI is built on |
+
+The probes are open on purpose: a liveness check that needs a secret fails when
+the secret is rotated. Everything else is behind `server.auth.token`, as a
+bearer header or a cookie, with failed attempts throttled per source address.
+Prometheus reads it with `authorization: { credentials_file: … }`.
+
+`on_overlap` decides what happens when a run is still going at its next slot:
+`skip` (default), `queue` (run it once the current one finishes) or `fail`.
+Either way the event is `schedule.missed`.
 
 ## Notifications and metrics
 
@@ -296,7 +340,7 @@ and Discord (`template:`). Delivery is three attempts with jittered backoff,
 and a `4xx` is not retried: the receiver understood and refused. **A webhook
 that is down never fails a backup** — the backup is already in the bucket.
 
-`vaultd serve` exposes Prometheus metrics (M7). The one worth alerting on is
+`vaultd serve` exposes Prometheus metrics. The one worth alerting on is
 `vaultd_backup_last_success_timestamp`: every other series describes a run that
 happened, and a backup tool fails by runs not happening at all.
 
@@ -365,6 +409,10 @@ internal/verify/     L0/L1/L2 checks, the format validators and the assertions
 internal/restore/    streaming a stored backup back into a database
 internal/backup/     the orchestration: probe → stream → manifest
 internal/notify/     webhook delivery: signing, retry, dedup, chat templates
+internal/lock/       the per-target lease in the bucket: acquire, heartbeat, release
+internal/scheduler/  what is due, and the one execution path all modes share
+internal/prune/      applying a retention plan: objects first, index second
+internal/server/     HTTP: probes, metrics, the read-only API, the UI
 internal/metrics/    the Prometheus collectors
 internal/doctor/     the network half of the config check
 internal/app/        config to adapters, the wiring layer
@@ -375,4 +423,6 @@ test/e2e/            acceptance tests against real containers and real R2
 examples/            example config and demo environment
 ```
 
-Adapters land next to their port as they arrive: `internal/notify/` in M6.
+Adapters live next to the port they implement: an engine under
+`internal/engine/`, a bucket under `internal/storage/`, a webhook under
+`internal/notify/`. `internal/core/` imports none of them.

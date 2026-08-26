@@ -303,12 +303,20 @@ func newStore(t *testing.T, bucket string) *s3.Store {
 // run invokes the CLI in-process, exactly as main does.
 func run(t *testing.T, args ...string) (stdout, stderr string, err error) {
 	t.Helper()
+	return runContext(t.Context(), t, args...)
+}
+
+// runContext is run with a context the caller controls, for the commands that
+// only stop when they are told to.
+func runContext(ctx context.Context, t *testing.T, args ...string) (stdout, stderr string, err error) {
+	t.Helper()
 
 	var out, errOut bytes.Buffer
+	//nolint:contextcheck // the context reaches every command through ExecuteContext, below.
 	root := cli.NewRootCommand(&out, &errOut)
 	root.SetArgs(args)
 
-	err = root.ExecuteContext(t.Context())
+	err = root.ExecuteContext(ctx)
 	return out.String(), errOut.String(), err
 }
 

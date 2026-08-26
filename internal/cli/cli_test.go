@@ -145,24 +145,26 @@ func TestUnknownFlagIsAUsageError(t *testing.T) {
 	assert.Equal(t, ExitUsage, code)
 }
 
-func TestPlannedCommandsFailLoudly(t *testing.T) {
-	for _, tc := range []struct {
-		args      []string
-		milestone string
-	}{
-		{[]string{"serve"}, "M7"},
+// Every command that needs a config refuses to do anything without one. For
+// the daemon it matters most: a `serve` that started on a missing config would
+// sit there looking healthy while backing nothing up.
+func TestCommandsRefuseAMissingConfig(t *testing.T) {
+	for _, args := range [][]string{
+		{"serve"},
+		{"run"},
+		{"doctor"},
+		{"backup", "prod-pg"},
 	} {
-		t.Run(tc.args[0], func(t *testing.T) {
-			_, stderr, code := run(t, tc.args...)
+		t.Run(args[0], func(t *testing.T) {
+			_, stderr, code := run(t, args...)
 
 			assert.Equal(t, ExitError, code)
-			assert.Contains(t, stderr, "not implemented yet")
-			assert.Contains(t, stderr, tc.milestone)
+			assert.Contains(t, stderr, "does not exist")
 		})
 	}
 }
 
-func TestPlannedCommandsCheckTheirArguments(t *testing.T) {
+func TestCommandsCheckTheirArguments(t *testing.T) {
 	_, _, code := run(t, "backup") // needs exactly one target
 
 	assert.Equal(t, ExitError, code)

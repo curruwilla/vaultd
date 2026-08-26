@@ -12,9 +12,7 @@ import (
 	"github.com/curruwilla/vaultd/internal/app"
 	"github.com/curruwilla/vaultd/internal/config"
 	"github.com/curruwilla/vaultd/internal/core"
-	"github.com/curruwilla/vaultd/internal/index"
-	"github.com/curruwilla/vaultd/internal/manifest"
-	"github.com/curruwilla/vaultd/internal/notify"
+	"github.com/curruwilla/vaultd/internal/prune"
 	"github.com/curruwilla/vaultd/internal/retention"
 )
 
@@ -48,11 +46,12 @@ func newPruneCommand(g *globals) *cobra.Command {
 			application := app.New(cfg, g.logger)
 			ctx := cmd.Context()
 
-			idx, err := application.Index(ctx, target)
+			runner, err := application.Pruner(ctx, target)
 			if err != nil {
 				return err
 			}
-			entries, cached, err := idx.Entries(ctx)
+
+			plan, cached, err := runner.Plan(ctx)
 			if err != nil {
 				return err
 			}
@@ -64,17 +63,11 @@ func newPruneCommand(g *globals) *cobra.Command {
 					target.Name, target.Name)
 			}
 
-			plan := application.Retention(target).Plan(retention.Input{
-				Backups:       backupsOf(entries),
-				Now:           time.Now().UTC(),
-				LastRunFailed: lastRunFailed(entries),
-			})
-
 			g.printPlan2(target.Name, plan)
 
 			var strays []core.ObjectInfo
 			if orphans {
-				strays, err = findOrphans(ctx, application, target, entries, grace)
+				strays, err = g.findOrphans(ctx, application, target, grace)
 				if err != nil {
 					return err
 				}
@@ -86,18 +79,9 @@ func newPruneCommand(g *globals) *cobra.Command {
 				return nil
 			}
 
-			notifier, err := application.Notifier(target)
-			if err != nil {
-				return err
-			}
-			// A blocked plan is reported even though nothing was deleted: the
-			// first night is the invariants working, and the thirtieth is a
-			// bucket growing without bound (SPEC §7).
-			if plan.Blocked != "" {
-				notify.Emit(ctx, notifier, g.logger, retention.BlockedEvent(target.Name, time.Now().UTC(), plan))
-			}
+			runner.AnnounceBlocked(ctx, plan)
 
-			return g.applyPrune(ctx, application, target, idx, plan, strays, notifier)
+			return g.applyPrune(ctx, runner, plan, strays)
 		},
 	}
 
@@ -107,40 +91,6 @@ func newPruneCommand(g *globals) *cobra.Command {
 		"how old an unreferenced object must be before it counts as an orphan")
 
 	return cmd
-}
-
-// backupsOf turns index entries into what retention reasons about.
-func backupsOf(entries []manifest.Entry) []retention.Backup {
-	out := make([]retention.Backup, 0, len(entries))
-	for _, entry := range entries {
-		if !entry.Succeeded() {
-			continue
-		}
-		out = append(out, retention.Backup{
-			ID:       entry.ID,
-			At:       entry.FinishedAt,
-			Verified: entry.Verified(),
-			Bytes:    entry.Bytes,
-			Keys:     entry.Keys(),
-		})
-	}
-	return out
-}
-
-// lastRunFailed reports whether the most recent attempt — successful or not —
-// ended in failure.
-func lastRunFailed(entries []manifest.Entry) bool {
-	if len(entries) == 0 {
-		return false
-	}
-
-	latest := entries[0]
-	for _, entry := range entries[1:] {
-		if entry.FinishedAt.After(latest.FinishedAt) {
-			latest = entry
-		}
-	}
-	return !latest.Succeeded()
 }
 
 func (g *globals) printPlan2(target string, plan retention.Plan) {
@@ -220,79 +170,39 @@ func (g *globals) printDryRun(plan retention.Plan, strays []core.ObjectInfo) {
 
 func (g *globals) applyPrune(
 	ctx context.Context,
-	application *app.App,
-	target *config.Target,
-	idx *index.Store,
+	runner *prune.Runner,
 	plan retention.Plan,
 	strays []core.ObjectInfo,
-	notifier core.Notifier,
 ) error {
-	keys := plan.Keys()
+	extra := make([]string, 0, len(strays))
 	for _, object := range strays {
-		keys = append(keys, object.Key)
+		extra = append(extra, object.Key)
 	}
-	if len(keys) == 0 {
+	if len(plan.Delete) == 0 && len(extra) == 0 {
 		fmt.Fprintln(g.out, "\nnothing to delete")
 		return nil
 	}
 
-	store, err := application.Store(ctx, target.Destination)
+	objects, err := runner.Apply(ctx, plan, extra)
 	if err != nil {
 		return err
-	}
-	if err := store.Delete(ctx, keys); err != nil {
-		return err
-	}
-
-	// The index is updated only after the objects are gone: an index that
-	// still lists a deleted backup is a stale cache, while one that hides a
-	// backup which is still there hides a restore.
-	if err := idx.Remove(ctx, deletedIDs(plan), oldestKept(plan)); err != nil {
-		return fmt.Errorf("the objects were deleted but the index was not updated; run `vaultd reindex %s`: %w",
-			target.Name, err)
 	}
 
 	fmt.Fprintf(g.out, "\ndeleted %s and %s (%s freed)\n",
 		plural(len(plan.Delete), "backup", "backups"),
-		plural(len(keys), "object", "objects"),
+		plural(objects, "object", "objects"),
 		humanBytes(plan.Bytes()))
-
-	if len(plan.Delete) > 0 {
-		notify.Emit(ctx, notifier, g.logger, retention.PrunedEvent(target.Name, time.Now().UTC(), plan, len(keys)))
-	}
 	return nil
-}
-
-// deletedIDs are the backups the plan removes.
-func deletedIDs(plan retention.Plan) []string {
-	ids := make([]string, 0, len(plan.Delete))
-	for _, decision := range plan.Delete {
-		ids = append(ids, decision.Backup.ID)
-	}
-	return ids
-}
-
-// oldestKept is where the retained window starts; failure records older than
-// it describe a period nothing survives from.
-func oldestKept(plan retention.Plan) time.Time {
-	var oldest time.Time
-	for _, decision := range plan.Keep {
-		if oldest.IsZero() || decision.Backup.At.Before(oldest) {
-			oldest = decision.Backup.At
-		}
-	}
-	return oldest
 }
 
 // findOrphans lists objects under the target's prefix that no index entry
 // claims. They are the residue of an interrupted run or of a manual deletion,
 // and they are only ever removed on an explicit --orphans (SPEC §7,
 // invariant 4).
-func findOrphans(
+func (g *globals) findOrphans(
 	ctx context.Context,
 	application *app.App,
 	target *config.Target,
-	entries []manifest.Entry,
 	grace time.Duration,
 ) ([]core.ObjectInfo, error) {
 	store, err := application.Store(ctx, target.Destination)
@@ -300,6 +210,14 @@ func findOrphans(
 		return nil, err
 	}
 	layout, err := application.Layout(target)
+	if err != nil {
+		return nil, err
+	}
+	idx, err := application.Index(ctx, target)
+	if err != nil {
+		return nil, err
+	}
+	entries, _, err := idx.Entries(ctx)
 	if err != nil {
 		return nil, err
 	}

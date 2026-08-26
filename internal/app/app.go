@@ -28,6 +28,7 @@ import (
 	"github.com/curruwilla/vaultd/internal/manifest"
 	"github.com/curruwilla/vaultd/internal/notify"
 	"github.com/curruwilla/vaultd/internal/pipeline"
+	"github.com/curruwilla/vaultd/internal/prune"
 	"github.com/curruwilla/vaultd/internal/retention"
 	"github.com/curruwilla/vaultd/internal/storage/s3"
 	"github.com/curruwilla/vaultd/internal/verify"
@@ -42,6 +43,7 @@ type App struct {
 
 	mu        sync.Mutex
 	stores    map[string]core.Store
+	dumpers   map[string]core.Dumper
 	notifiers map[string]core.Notifier
 	fanouts   map[string]*notify.Fanout
 	client    *http.Client
@@ -56,6 +58,7 @@ func New(cfg *config.Config, log *slog.Logger) *App {
 		cfg:       cfg,
 		log:       log,
 		stores:    map[string]core.Store{},
+		dumpers:   map[string]core.Dumper{},
 		notifiers: map[string]core.Notifier{},
 		fanouts:   map[string]*notify.Fanout{},
 	}
@@ -104,11 +107,27 @@ func (a *App) SetStore(name string, store core.Store) {
 	a.stores[name] = store
 }
 
+// SetDumper installs a dumper for a target, bypassing the engine registry.
+// Tests use it to drive the real orchestration — lock, schedule, manifest,
+// index — without a database.
+func (a *App) SetDumper(target string, dumper core.Dumper) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.dumpers[target] = dumper
+}
+
 // Dumper builds the engine adapter of a target.
 //
 // This switch is the engine registry: adding an engine means adding a case and
 // its package, and nothing else in the codebase learns a new name.
 func (a *App) Dumper(target *config.Target) (core.Dumper, error) {
+	a.mu.Lock()
+	installed, ok := a.dumpers[target.Name]
+	a.mu.Unlock()
+	if ok {
+		return installed, nil
+	}
+
 	switch target.Engine {
 	case core.EnginePostgres:
 		return postgres.New(postgres.Options{
@@ -435,4 +454,32 @@ func storageClassFor(dest *config.Destination) string {
 		return ""
 	}
 	return dest.StorageClass
+}
+
+// Pruner assembles the retention runner of a target: the policy it applies,
+// the bucket it deletes from, the index it puts back in step, and the
+// notifiers that hear about it.
+func (a *App) Pruner(ctx context.Context, target *config.Target) (*prune.Runner, error) {
+	store, err := a.Store(ctx, target.Destination)
+	if err != nil {
+		return nil, err
+	}
+	idx, err := a.Index(ctx, target)
+	if err != nil {
+		return nil, err
+	}
+	notifier, err := a.Notifier(target)
+	if err != nil {
+		return nil, err
+	}
+
+	return &prune.Runner{
+		Target: target.Name,
+		Store:  store,
+		Index:  idx,
+		Policy: a.Retention(target),
+		Notify: notifier,
+		Now:    func() time.Time { return time.Now().UTC() },
+		Log:    a.log,
+	}, nil
 }
