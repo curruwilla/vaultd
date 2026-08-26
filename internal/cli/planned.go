@@ -11,13 +11,6 @@ import (
 // documents the shape a script will eventually get; running one fails loudly
 // with the milestone that brings it, instead of silently doing nothing.
 func newPlannedCommands(g *globals) []*cobra.Command {
-	doctor := &cobra.Command{
-		Use:   "doctor",
-		Short: "Check connectivity: databases, client binaries, bucket, webhooks",
-		Args:  cobra.NoArgs,
-		RunE:  planned(g, "doctor", "M6"),
-	}
-
 	serve := &cobra.Command{
 		Use:   "serve",
 		Short: "Run the daemon: scheduler, locks, metrics and UI",
@@ -32,7 +25,7 @@ func newPlannedCommands(g *globals) []*cobra.Command {
 		RunE:  planned(g, "run", "M7"),
 	}
 
-	return []*cobra.Command{doctor, serve, run}
+	return []*cobra.Command{serve, run}
 }
 
 func planned(g *globals, name, milestone string) func(*cobra.Command, []string) error {

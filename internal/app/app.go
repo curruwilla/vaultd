@@ -12,6 +12,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"sync"
 	"time"
 
@@ -25,6 +26,7 @@ import (
 	"github.com/curruwilla/vaultd/internal/engine/postgres"
 	"github.com/curruwilla/vaultd/internal/index"
 	"github.com/curruwilla/vaultd/internal/manifest"
+	"github.com/curruwilla/vaultd/internal/notify"
 	"github.com/curruwilla/vaultd/internal/pipeline"
 	"github.com/curruwilla/vaultd/internal/retention"
 	"github.com/curruwilla/vaultd/internal/storage/s3"
@@ -38,8 +40,11 @@ type App struct {
 	cfg *config.Config
 	log *slog.Logger
 
-	mu     sync.Mutex
-	stores map[string]core.Store
+	mu        sync.Mutex
+	stores    map[string]core.Store
+	notifiers map[string]core.Notifier
+	fanouts   map[string]*notify.Fanout
+	client    *http.Client
 }
 
 // New returns an App over an already validated config.
@@ -47,7 +52,13 @@ func New(cfg *config.Config, log *slog.Logger) *App {
 	if log == nil {
 		log = slog.Default()
 	}
-	return &App{cfg: cfg, log: log, stores: map[string]core.Store{}}
+	return &App{
+		cfg:       cfg,
+		log:       log,
+		stores:    map[string]core.Store{},
+		notifiers: map[string]core.Notifier{},
+		fanouts:   map[string]*notify.Fanout{},
+	}
 }
 
 // Config returns the configuration this App was built from.
@@ -249,10 +260,16 @@ func (a *App) Verifier(
 		return nil, err
 	}
 
+	notifier, err := a.Notifier(target)
+	if err != nil {
+		return nil, err
+	}
+
 	verifier := &verify.Verifier{
 		Store:      store,
 		Index:      idx,
 		Identities: identities,
+		Notify:     notifier,
 		Now:        func() time.Time { return time.Now().UTC() },
 		Log:        a.log,
 	}
@@ -367,11 +384,16 @@ func (a *App) Runner(ctx context.Context, target *config.Target) (*backup.Runner
 	if err != nil {
 		return nil, err
 	}
+	notifier, err := a.Notifier(target)
+	if err != nil {
+		return nil, err
+	}
 
 	return &backup.Runner{
 		Store:  store,
 		Dumper: dumper,
 		Index:  index.New(store, layout),
+		Notify: notifier,
 		Now:    func() time.Time { return time.Now().UTC() },
 		Log:    a.log,
 	}, nil

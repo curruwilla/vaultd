@@ -331,27 +331,14 @@ const (
 
 var AuthModes = []AuthMode{AuthToken, AuthNone}
 
-// Event is a notification event name (SPEC §12).
-type Event string
+// Event is a notification event name (SPEC §12). It is an alias rather than a
+// type of its own: the config declares which events a notifier subscribes to,
+// and the runner emits exactly the same values, so there is one vocabulary and
+// no translation table between them.
+type Event = core.Event
 
-const (
-	EventBackupStarted    Event = "backup.started"
-	EventBackupSucceeded  Event = "backup.succeeded"
-	EventBackupFailed     Event = "backup.failed"
-	EventVerifySucceeded  Event = "verify.succeeded"
-	EventVerifyFailed     Event = "verify.failed"
-	EventRetentionPruned  Event = "retention.pruned"
-	EventRetentionBlocked Event = "retention.blocked"
-	EventScheduleMissed   Event = "schedule.missed"
-	EventStorageError     Event = "storage.error"
-)
-
-var Events = []Event{
-	EventBackupStarted, EventBackupSucceeded, EventBackupFailed,
-	EventVerifySucceeded, EventVerifyFailed,
-	EventRetentionPruned, EventRetentionBlocked,
-	EventScheduleMissed, EventStorageError,
-}
+// Events is every event a notifier may subscribe to.
+var Events = core.Events
 
 // Duration is a time.Duration written as a YAML string ("4h", "30m").
 type Duration time.Duration

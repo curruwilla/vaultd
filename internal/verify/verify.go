@@ -23,6 +23,7 @@ import (
 	"github.com/curruwilla/vaultd/internal/core"
 	"github.com/curruwilla/vaultd/internal/index"
 	"github.com/curruwilla/vaultd/internal/manifest"
+	"github.com/curruwilla/vaultd/internal/notify"
 	"github.com/curruwilla/vaultd/internal/pipeline"
 )
 
@@ -102,8 +103,12 @@ type Verifier struct {
 	Assertions []Assertion
 	// RestoreTimeout bounds one L2 restore; zero means the context decides.
 	RestoreTimeout time.Duration
-	Now            func() time.Time
-	Log            *slog.Logger
+	// Notify receives verify.succeeded and verify.failed (SPEC §12). A skipped
+	// check sends nothing: it found no problem, and paging someone because a
+	// staging server is a major behind would train them to ignore the channel.
+	Notify core.Notifier
+	Now    func() time.Time
+	Log    *slog.Logger
 }
 
 // Backup verifies one indexed backup at the given level and records the
@@ -128,6 +133,8 @@ func (v *Verifier) Backup(ctx context.Context, entry manifest.Entry, level Level
 		// the verification the backup already has with the absence of one.
 		return result, nil
 	}
+
+	notify.Emit(ctx, v.Notify, v.Log, verifiedEvent(m, result))
 
 	if err := v.record(ctx, m, entry.ManifestKey, result); err != nil {
 		// The check itself succeeded; failing to write the outcome down is

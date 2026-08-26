@@ -223,3 +223,96 @@ var ErrSandboxUnsupported = errors.New("this backup cannot be restored into an e
 // ErrQueryUnsupported is returned by an Inspector for an engine with no query
 // language to run a `query` assertion against.
 var ErrQueryUnsupported = errors.New("this engine has no queries to assert on")
+
+// Event names something worth telling an operator about, in the vocabulary a
+// notifier subscribes to (SPEC §12). It lives here rather than in the config
+// package because the config declares which events a notifier wants, the
+// runner emits them and the notify adapters render them: three packages that
+// must agree on one spelling.
+type Event string
+
+const (
+	EventBackupStarted    Event = "backup.started"
+	EventBackupSucceeded  Event = "backup.succeeded"
+	EventBackupFailed     Event = "backup.failed"
+	EventVerifySucceeded  Event = "verify.succeeded"
+	EventVerifyFailed     Event = "verify.failed"
+	EventRetentionPruned  Event = "retention.pruned"
+	EventRetentionBlocked Event = "retention.blocked"
+	EventScheduleMissed   Event = "schedule.missed"
+	EventStorageError     Event = "storage.error"
+)
+
+// Events lists every event a notifier may subscribe to.
+var Events = []Event{
+	EventBackupStarted, EventBackupSucceeded, EventBackupFailed,
+	EventVerifySucceeded, EventVerifyFailed,
+	EventRetentionPruned, EventRetentionBlocked,
+	EventScheduleMissed, EventStorageError,
+}
+
+func (e Event) Valid() bool {
+	for _, known := range Events {
+		if e == known {
+			return true
+		}
+	}
+	return false
+}
+
+// Severity ranks a notification for whoever is on call. It is derived from the
+// event, never configured: an operator who can downgrade backup.failed to
+// "info" has built themselves a silent outage.
+type Severity string
+
+const (
+	SeverityInfo     Severity = "info"
+	SeverityWarning  Severity = "warning"
+	SeverityCritical Severity = "critical"
+)
+
+// SeverityOf returns the severity an event always carries.
+func SeverityOf(event Event) Severity {
+	switch event {
+	case EventBackupFailed, EventVerifyFailed, EventStorageError:
+		return SeverityCritical
+	case EventRetentionBlocked, EventScheduleMissed:
+		return SeverityWarning
+	default:
+		return SeverityInfo
+	}
+}
+
+// Failure is the error carried by a notification. StderrTail is the last of
+// what the database client printed (SPEC §11): it is usually the only place
+// the real reason for a failed dump is written down.
+type Failure struct {
+	Phase      string `json:"phase,omitempty"`
+	Code       string `json:"code,omitempty"`
+	Message    string `json:"message"`
+	StderrTail string `json:"stderr_tail,omitempty"`
+}
+
+// Notification is one delivered event (SPEC §12). Everything in it is already
+// redacted: it travels to a third-party endpoint, so a DSN or a token that
+// reaches this struct has left the building.
+type Notification struct {
+	Event      Event          `json:"event"`
+	At         time.Time      `json:"at"`
+	Target     string         `json:"target,omitempty"`
+	BackupID   string         `json:"backup_id,omitempty"`
+	Severity   Severity       `json:"severity"`
+	DurationMS int64          `json:"duration_ms,omitempty"`
+	Error      *Failure       `json:"error,omitempty"`
+	Summary    string         `json:"summary"`
+	Details    map[string]any `json:"details,omitempty"`
+}
+
+// Notifier delivers a notification to one endpoint.
+//
+// A Notifier reports its delivery failures so they can be logged, but no
+// caller may fail a backup over one: a webhook that is down does not make a
+// stored backup any less stored (SPEC §12).
+type Notifier interface {
+	Notify(ctx context.Context, n Notification) error
+}

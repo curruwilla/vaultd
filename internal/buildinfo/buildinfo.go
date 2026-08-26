@@ -63,3 +63,26 @@ func String() string {
 	}
 	return fmt.Sprintf("%s, %s %s/%s", out, runtime.Version(), runtime.GOOS, runtime.GOARCH)
 }
+
+// Info is the build description as data, for the metrics build_info gauge and
+// the server's /api/version.
+type Info struct {
+	Version   string `json:"version"`
+	Commit    string `json:"commit,omitempty"`
+	Date      string `json:"date,omitempty"`
+	GoVersion string `json:"go_version"`
+	OS        string `json:"os"`
+	Arch      string `json:"arch"`
+}
+
+// Get returns the build metadata of the running binary.
+func Get() Info {
+	return Info{
+		Version:   Short(),
+		Commit:    Commit,
+		Date:      Date,
+		GoVersion: runtime.Version(),
+		OS:        runtime.GOOS,
+		Arch:      runtime.GOARCH,
+	}
+}

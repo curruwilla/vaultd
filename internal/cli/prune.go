@@ -14,6 +14,7 @@ import (
 	"github.com/curruwilla/vaultd/internal/core"
 	"github.com/curruwilla/vaultd/internal/index"
 	"github.com/curruwilla/vaultd/internal/manifest"
+	"github.com/curruwilla/vaultd/internal/notify"
 	"github.com/curruwilla/vaultd/internal/retention"
 )
 
@@ -84,7 +85,19 @@ func newPruneCommand(g *globals) *cobra.Command {
 				g.printDryRun(plan, strays)
 				return nil
 			}
-			return g.applyPrune(ctx, application, target, idx, plan, strays)
+
+			notifier, err := application.Notifier(target)
+			if err != nil {
+				return err
+			}
+			// A blocked plan is reported even though nothing was deleted: the
+			// first night is the invariants working, and the thirtieth is a
+			// bucket growing without bound (SPEC §7).
+			if plan.Blocked != "" {
+				notify.Emit(ctx, notifier, g.logger, retention.BlockedEvent(target.Name, time.Now().UTC(), plan))
+			}
+
+			return g.applyPrune(ctx, application, target, idx, plan, strays, notifier)
 		},
 	}
 
@@ -212,6 +225,7 @@ func (g *globals) applyPrune(
 	idx *index.Store,
 	plan retention.Plan,
 	strays []core.ObjectInfo,
+	notifier core.Notifier,
 ) error {
 	keys := plan.Keys()
 	for _, object := range strays {
@@ -242,6 +256,10 @@ func (g *globals) applyPrune(
 		plural(len(plan.Delete), "backup", "backups"),
 		plural(len(keys), "object", "objects"),
 		humanBytes(plan.Bytes()))
+
+	if len(plan.Delete) > 0 {
+		notify.Emit(ctx, notifier, g.logger, retention.PrunedEvent(target.Name, time.Now().UTC(), plan, len(keys)))
+	}
 	return nil
 }
 

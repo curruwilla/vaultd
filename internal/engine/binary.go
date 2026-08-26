@@ -3,7 +3,9 @@ package engine
 import (
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -59,4 +61,47 @@ func ProbeBinary(ctx context.Context, name, path string) (Binary, error) {
 		return Binary{}, fmt.Errorf("%s: %w", path, err)
 	}
 	return Binary{Name: name, Path: path, Version: version, Major: major}, nil
+}
+
+// Scan reports every usable copy of a client binary: the versioned
+// directories first, then whatever PATH resolves to, deduplicated by path.
+//
+// It is what `vaultd doctor` reports and what the error messages promise —
+// "found none installed" has to be a statement about the whole search, not
+// about one directory.
+func Scan(ctx context.Context, name string, dirs []string) []Binary {
+	var (
+		found []Binary
+		seen  = map[string]bool{}
+	)
+
+	candidates := make([]string, 0, len(dirs)+1)
+	for _, dir := range dirs {
+		candidates = append(candidates, filepath.Join(dir, name))
+	}
+	if path, err := exec.LookPath(name); err == nil {
+		candidates = append(candidates, path)
+	}
+
+	for _, candidate := range candidates {
+		resolved, err := filepath.EvalSymlinks(candidate)
+		if err != nil {
+			continue
+		}
+		if seen[resolved] {
+			continue
+		}
+		seen[resolved] = true
+
+		info, err := os.Stat(resolved)
+		if err != nil || info.IsDir() || info.Mode()&0o111 == 0 {
+			continue
+		}
+		binary, err := ProbeBinary(ctx, name, candidate)
+		if err != nil {
+			continue
+		}
+		found = append(found, binary)
+	}
+	return found
 }

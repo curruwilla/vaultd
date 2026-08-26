@@ -15,6 +15,7 @@ import (
 	"github.com/curruwilla/vaultd/internal/core"
 	"github.com/curruwilla/vaultd/internal/index"
 	"github.com/curruwilla/vaultd/internal/manifest"
+	"github.com/curruwilla/vaultd/internal/notify"
 	"github.com/curruwilla/vaultd/internal/pipeline"
 )
 
@@ -66,6 +67,10 @@ type Runner struct {
 	// Index is the listing cache. It is optional: a backup is complete once
 	// its manifest is stored, and the index can always be rebuilt from those.
 	Index *index.Store
+	// Notify receives this run's lifecycle events (SPEC §12). It is optional,
+	// and a delivery failure is logged rather than returned: a webhook that is
+	// down does not make a stored backup any less stored.
+	Notify core.Notifier
 	// Now is the clock; tests replace it so keys are deterministic.
 	Now func() time.Time
 	Log *slog.Logger
@@ -131,12 +136,15 @@ func (r *Runner) Run(ctx context.Context, spec Spec) (result *manifest.Manifest,
 	started := r.now()
 	log := r.log().With("target", spec.Target, "engine", string(spec.Engine))
 
+	notify.Emit(ctx, r.Notify, log, startedEvent(spec, started))
+
 	// A failed run is recorded too. Retention refuses to delete anything while
 	// the most recent attempt failed (SPEC §7, invariant 3), and an index that
 	// only holds successes cannot tell a quiet week from a broken one.
 	defer func() {
 		if err != nil {
 			r.recordFailure(ctx, spec, started, err)
+			notify.Emit(ctx, r.Notify, log, failedEvent(spec, started, r.now(), err))
 		}
 	}()
 
@@ -254,6 +262,8 @@ func (r *Runner) Run(ctx context.Context, spec Spec) (result *manifest.Manifest,
 		"bytes", m.Object.Bytes,
 		"plaintext_bytes", m.Plaintext.Bytes,
 		"duration_ms", m.DurationMS)
+
+	notify.Emit(ctx, r.Notify, log, succeededEvent(m))
 
 	return m, nil
 }

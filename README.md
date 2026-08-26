@@ -267,8 +267,47 @@ Opting out is legal, but it is a line in the YAML that a reviewer can see.
 | `vaultd reindex <target>` | ready |
 | `vaultd verify [id]` | ready — integrity, structural and restore (`--gc` collects leftovers) |
 | `vaultd restore <id> --to <dsn>` | ready |
-| `vaultd doctor` | M6 |
+| `vaultd doctor [target...]` | ready — clients, databases, bucket, notifiers |
 | `vaultd serve`, `vaultd run` | M7 |
+
+## Notifications and metrics
+
+`vaultd validate` proves the config is coherent without opening a socket.
+`vaultd doctor` proves the world it describes exists: which database clients
+are installed, whether every target's server answers, whether each bucket
+accepts the two conditional writes the target lock and the index are built on
+(`If-None-Match`, `If-Match`) — with a canary object it deletes again — and
+whether the notifier endpoints are reachable.
+
+```bash
+vaultd doctor                 # everything
+vaultd doctor prod-pg         # one target
+vaultd doctor --json          # for a monitoring check
+vaultd doctor --notify        # also send a real signed test delivery
+```
+
+Notifiers are dialled, not posted to, unless `--notify` is given: a notifier
+subscribed to `backup.failed` usually points at somebody's pager, and a health
+check that pages on-call every time it runs is a health check people mute.
+
+Events are delivered as signed JSON — `X-Vaultd-Signature: sha256=<hmac>` and
+`X-Vaultd-Event` — in the generic vaultd shape, or rendered natively for Slack
+and Discord (`template:`). Delivery is three attempts with jittered backoff,
+and a `4xx` is not retried: the receiver understood and refused. **A webhook
+that is down never fails a backup** — the backup is already in the bucket.
+
+`vaultd serve` exposes Prometheus metrics (M7). The one worth alerting on is
+`vaultd_backup_last_success_timestamp`: every other series describes a run that
+happened, and a backup tool fails by runs not happening at all.
+
+| Metric | Type |
+| --- | --- |
+| `vaultd_backup_last_success_timestamp{target}` | gauge — alert on its age |
+| `vaultd_backup_duration_seconds{target,engine}` | histogram |
+| `vaultd_backup_bytes{target,kind}` | gauge — `compressed` and `plain` |
+| `vaultd_backup_failures_total{target,phase}` | counter |
+| `vaultd_verify_last_success_timestamp{target,level}` | gauge |
+| `vaultd_retention_objects{target,tier}` | gauge |
 
 ## Development
 
@@ -325,6 +364,9 @@ internal/retention/  GFS classification and the invariants prune obeys
 internal/verify/     L0/L1/L2 checks, the format validators and the assertions
 internal/restore/    streaming a stored backup back into a database
 internal/backup/     the orchestration: probe → stream → manifest
+internal/notify/     webhook delivery: signing, retry, dedup, chat templates
+internal/metrics/    the Prometheus collectors
+internal/doctor/     the network half of the config check
 internal/app/        config to adapters, the wiring layer
 internal/cli/        the cobra command tree
 internal/buildinfo/  version stamped at link time
