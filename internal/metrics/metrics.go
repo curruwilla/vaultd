@@ -139,9 +139,12 @@ func (m *Metrics) BackupSucceeded(target, engine string, d time.Duration, compre
 
 // BackupFailed records one failed run against the phase it died in.
 //
-// Nothing is observed on the duration histogram: a run that failed has no
-// duration worth comparing against the ones that worked, and mixing them would
-// make the p99 of a healthy target move every time an unhealthy one broke.
+// The duration histogram is not touched at all — not even to create its child.
+// The engine is only known once the probe has run, so a failure carries no
+// value for that label, and a series stamped engine="" would sit in the
+// exposition forever describing nothing. Nothing is observed either: a run
+// that failed has no duration worth mixing into the quantiles of the ones
+// that worked.
 func (m *Metrics) BackupFailed(target, phase string) {
 	m.backupFailures.WithLabelValues(target, phase).Inc()
 }

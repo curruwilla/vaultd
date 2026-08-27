@@ -63,6 +63,19 @@ func TestFailuresCountByPhase(t *testing.T) {
 	assert.Contains(t, body, `vaultd_backup_failures_total{phase="upload",target="prod-pg"} 1`)
 }
 
+// The engine is only known once the probe has run, so a failed run has no
+// value for that label. Reaching for the duration histogram to record one
+// would publish a permanent engine="" series that describes nothing.
+func TestAFailedRunStampsNoDurationSeries(t *testing.T) {
+	t.Parallel()
+
+	m := metrics.New()
+	m.BackupFailed("prod-pg", "probe")
+
+	assert.NotContains(t, scrape(t, m), "vaultd_backup_duration_seconds",
+		"a failed run has no engine and no duration to publish")
+}
+
 // A restarted daemon whose gauges begin at zero would fire every age alert it
 // has. Seeding from the index is what stops a deploy paging on-call.
 func TestSeedingPublishesTheLastKnownRun(t *testing.T) {
